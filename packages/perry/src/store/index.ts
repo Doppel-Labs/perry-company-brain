@@ -5,6 +5,7 @@ export * from "./db";
 export * from "./fts";
 export * from "./graph-sync";
 export * from "./ingestion-queue";
+export * from "./job-queue";
 export * from "./issues";
 export * from "./meetings";
 export * from "./ontology";

@@ -1,10 +1,16 @@
-// graph-sync — split out of the former monolithic meeting-store.ts
-import { join } from "node:path";
-import { type GraphChangeSetRecord, type GraphSyncJobRecord, type GraphSyncQueueStats, type PageOptions, type Row } from "./types";
-import { insertAudit, normalizePage, statement, withBrainTransaction, withDb } from "./db";
+// graph-sync — durable queue for Graphiti graph-sync jobs (and their change-sets).
+import { type GraphChangeSetRecord, type GraphSyncJobRecord, type Row } from "./types";
+import { insertAudit, statement, withBrainTransaction, withDb } from "./db";
 import { graphSyncJobFromRow } from "./rows";
 import { markGraphChangeSetApplied, markGraphChangeSetFailed, upsertGraphChangeSet } from "./change-sets";
+import { createJobQueue } from "./job-queue";
 
+/**
+ * Enqueue (or re-enqueue) a graph-sync job for a meeting. Unlike ingestion this
+ * is keyed by job id with an upsert, so re-syncing a meeting resets the job and
+ * its attempts. When a validated change-set is supplied it's persisted in the
+ * same transaction, so the job and its payload commit atomically.
+ */
 export function enqueueGraphSyncJob(input: {
   id: string;
   entityType?: GraphSyncJobRecord["entityType"];
@@ -67,99 +73,24 @@ export function enqueueGraphSyncJob(input: {
           applyStatus: "queued",
         });
       }
-      const row = statement(db, "SELECT * FROM graph_sync_jobs WHERE id = ?").get(input.id) as Row;
-      return graphSyncJobFromRow(row);
+      return graphSyncJobFromRow(statement(db, "SELECT * FROM graph_sync_jobs WHERE id = ?").get(input.id) as Row);
     })
   );
 }
 
-export function claimGraphSyncJobs(limit = 10): GraphSyncJobRecord[] {
-  if (limit <= 0) return [];
-  const normalizedLimit = normalizePage({ limit }, 10, 1000).limit;
-  return withDb((db) =>
-    withBrainTransaction(() => {
-      const now = new Date().toISOString();
-      const rows = statement(
-        db,
-        `SELECT * FROM graph_sync_jobs
-         WHERE status = ? AND not_before <= ?
-         ORDER BY created_at ASC
-         LIMIT ?`
-      ).all("queued", now, normalizedLimit) as Row[];
-      if (rows.length === 0) return [];
-      for (const row of rows) {
-        statement(db, "UPDATE graph_sync_jobs SET status = ?, locked_at = ?, updated_at = ? WHERE id = ?").run(
-          "processing",
-          now,
-          now,
-          String(row.id)
-        );
-      }
-      const placeholders = rows.map(() => "?").join(", ");
-      return statement(db, `SELECT * FROM graph_sync_jobs WHERE id IN (${placeholders}) ORDER BY created_at ASC`)
-        .all(...rows.map((row) => String(row.id)))
-        .map((row) => graphSyncJobFromRow(row as Row));
-    })
-  );
-}
+// claim / complete / fail / stats / list come from the shared engine. The
+// change-set's apply-status mirrors the job via the onComplete/onFail hooks.
+const queue = createJobQueue<GraphSyncJobRecord>({
+  table: "graph_sync_jobs",
+  mapRow: graphSyncJobFromRow,
+  events: { prefix: "graph_sync", entity: "graph_sync_job" },
+  backoff: { capMs: 300_000, maxExp: 8 },
+  onComplete: (db, id, now) => markGraphChangeSetApplied(db, id, now),
+  onFail: (db, id, message, status) => markGraphChangeSetFailed(db, id, message, status),
+});
 
-export function completeGraphSyncJob(id: string, result: unknown): GraphSyncJobRecord | undefined {
-  return withDb((db) => {
-    const now = new Date().toISOString();
-    statement(
-      db,
-      "UPDATE graph_sync_jobs SET status = ?, result_json = ?, locked_at = NULL, last_error = NULL, updated_at = ? WHERE id = ?"
-    ).run("completed", JSON.stringify(result), now, id);
-    markGraphChangeSetApplied(db, id, now);
-    insertAudit(db, "graph_sync.completed", "graph_sync_job", id, {});
-    const row = statement(db, "SELECT * FROM graph_sync_jobs WHERE id = ?").get(id) as Row | undefined;
-    return row ? graphSyncJobFromRow(row) : undefined;
-  });
-}
-
-export function failGraphSyncJob(id: string, error: unknown): GraphSyncJobRecord | undefined {
-  return withDb((db) => {
-    const now = new Date().toISOString();
-    const row = statement(db, "SELECT attempts, max_attempts FROM graph_sync_jobs WHERE id = ?").get(id) as Row | undefined;
-    if (!row) return undefined;
-    const attempts = Number(row.attempts) + 1;
-    const maxAttempts = Number(row.max_attempts);
-    const finalFailure = attempts >= maxAttempts;
-    const notBefore = new Date(Date.now() + Math.min(300_000, 1000 * 2 ** Math.min(attempts, 8))).toISOString();
-    const message = error instanceof Error ? error.message : String(error);
-    statement(
-      db,
-      `UPDATE graph_sync_jobs
-       SET status = ?, attempts = ?, locked_at = NULL, last_error = ?, not_before = ?, updated_at = ?
-       WHERE id = ?`
-    ).run(finalFailure ? "failed" : "queued", attempts, message, finalFailure ? now : notBefore, now, id);
-    markGraphChangeSetFailed(db, id, message, finalFailure ? "failed" : "queued");
-    insertAudit(db, finalFailure ? "graph_sync.failed" : "graph_sync.retry_queued", "graph_sync_job", id, {
-      attempts,
-      error: message,
-    });
-    const updated = statement(db, "SELECT * FROM graph_sync_jobs WHERE id = ?").get(id) as Row;
-    return graphSyncJobFromRow(updated);
-  });
-}
-
-export function getGraphSyncQueueStats(): GraphSyncQueueStats {
-  return withDb((db) => {
-    const rows = statement(db, "SELECT status, COUNT(*) AS count FROM graph_sync_jobs GROUP BY status").all() as Row[];
-    const stats: GraphSyncQueueStats = { queued: 0, processing: 0, completed: 0, failed: 0 };
-    for (const row of rows) {
-      const status = String(row.status) as keyof GraphSyncQueueStats;
-      if (status in stats) stats[status] = Number(row.count);
-    }
-    return stats;
-  });
-}
-
-export function listGraphSyncJobs(options: PageOptions = {}): GraphSyncJobRecord[] {
-  const { limit, offset } = normalizePage(options, 50, 200);
-  return withDb((db) =>
-    statement(db, "SELECT * FROM graph_sync_jobs ORDER BY created_at DESC LIMIT ? OFFSET ?")
-      .all(limit, offset)
-      .map((row) => graphSyncJobFromRow(row as Row))
-  );
-}
+export const claimGraphSyncJobs = queue.claim;
+export const completeGraphSyncJob = queue.complete;
+export const failGraphSyncJob = queue.fail;
+export const getGraphSyncQueueStats = queue.stats;
+export const listGraphSyncJobs = queue.list;

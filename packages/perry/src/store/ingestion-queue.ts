@@ -1,9 +1,15 @@
-// ingestion-queue — split out of the former monolithic meeting-store.ts
-import { join } from "node:path";
-import { type IngestionJobRecord, type IngestionQueueStats, type PageOptions, type Row } from "./types";
-import { insertAudit, normalizePage, statement, withBrainTransaction, withDb } from "./db";
+// ingestion-queue — durable queue for Granola webhook ingestion jobs.
+import { type IngestionJobRecord, type Row } from "./types";
+import { insertAudit, statement, withBrainTransaction, withDb } from "./db";
 import { ingestionJobFromRow } from "./rows";
+import { createJobQueue } from "./job-queue";
 
+/**
+ * Enqueue a Granola ingestion job, keyed by idempotency: a replayed webhook
+ * (same idempotency key) returns the existing job instead of queuing a
+ * duplicate. The key is also written to a dedicated `idempotency_keys` ledger so
+ * the guarantee survives even if the job row is later pruned.
+ */
 export function enqueueIngestionJob(input: {
   id: string;
   idempotencyKey: string;
@@ -22,10 +28,10 @@ export function enqueueIngestionJob(input: {
       statement(
         db,
         `INSERT INTO ingestion_jobs (
-        id, type, idempotency_key, status, payload_json, attempts, max_attempts,
-        not_before, created_at, updated_at
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          id, type, idempotency_key, status, payload_json, attempts, max_attempts,
+          not_before, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         input.id,
         input.type ?? "granola.ingest",
@@ -50,6 +56,7 @@ export function enqueueIngestionJob(input: {
   );
 }
 
+/** Claim a single due ingestion job — the worker's one-at-a-time fast path. */
 export function claimNextIngestionJob(): IngestionJobRecord | undefined {
   return withDb((db) =>
     withBrainTransaction(() => {
@@ -69,97 +76,22 @@ export function claimNextIngestionJob(): IngestionJobRecord | undefined {
         now,
         id
       );
-      const claimed = statement(db, "SELECT * FROM ingestion_jobs WHERE id = ?").get(id) as Row;
-      return ingestionJobFromRow(claimed);
+      return ingestionJobFromRow(statement(db, "SELECT * FROM ingestion_jobs WHERE id = ?").get(id) as Row);
     })
   );
 }
 
-export function claimIngestionJobs(limit = 10): IngestionJobRecord[] {
-  if (limit <= 0) return [];
-  const normalizedLimit = normalizePage({ limit }, 10, 1000).limit;
-  return withDb((db) =>
-    withBrainTransaction(() => {
-      const now = new Date().toISOString();
-      const rows = statement(
-        db,
-        `SELECT * FROM ingestion_jobs
-         WHERE type = ? AND status = ? AND not_before <= ?
-         ORDER BY created_at ASC
-         LIMIT ?`
-      ).all("granola.ingest", "queued", now, normalizedLimit) as Row[];
-      if (rows.length === 0) return [];
-      for (const row of rows) {
-        statement(db, "UPDATE ingestion_jobs SET status = ?, locked_at = ?, updated_at = ? WHERE id = ?").run(
-          "processing",
-          now,
-          now,
-          String(row.id)
-        );
-      }
-      const placeholders = rows.map(() => "?").join(", ");
-      return statement(db, `SELECT * FROM ingestion_jobs WHERE id IN (${placeholders}) ORDER BY created_at ASC`)
-        .all(...rows.map((row) => String(row.id)))
-        .map((row) => ingestionJobFromRow(row as Row));
-    })
-  );
-}
+// claim(batch) / complete / fail / stats / list come from the shared engine.
+const queue = createJobQueue<IngestionJobRecord>({
+  table: "ingestion_jobs",
+  mapRow: ingestionJobFromRow,
+  events: { prefix: "ingestion_job", entity: "ingestion_job" },
+  backoff: { capMs: 60_000, maxExp: 6 },
+  claim: { where: "type = ?", params: ["granola.ingest"] },
+});
 
-export function completeIngestionJob(id: string, result: unknown): IngestionJobRecord | undefined {
-  return withDb((db) => {
-    const now = new Date().toISOString();
-    statement(
-      db,
-      "UPDATE ingestion_jobs SET status = ?, result_json = ?, locked_at = NULL, last_error = NULL, updated_at = ? WHERE id = ?"
-    ).run("completed", JSON.stringify(result), now, id);
-    insertAudit(db, "ingestion_job.completed", "ingestion_job", id, {});
-    const row = statement(db, "SELECT * FROM ingestion_jobs WHERE id = ?").get(id) as Row | undefined;
-    return row ? ingestionJobFromRow(row) : undefined;
-  });
-}
-
-export function failIngestionJob(id: string, error: unknown): IngestionJobRecord | undefined {
-  return withDb((db) => {
-    const now = new Date().toISOString();
-    const row = statement(db, "SELECT attempts, max_attempts FROM ingestion_jobs WHERE id = ?").get(id) as Row | undefined;
-    if (!row) return undefined;
-    const attempts = Number(row.attempts) + 1;
-    const maxAttempts = Number(row.max_attempts);
-    const finalFailure = attempts >= maxAttempts;
-    const notBefore = new Date(Date.now() + Math.min(60_000, 1000 * 2 ** Math.min(attempts, 6))).toISOString();
-    const message = error instanceof Error ? error.message : String(error);
-    statement(
-      db,
-      `UPDATE ingestion_jobs
-       SET status = ?, attempts = ?, locked_at = NULL, last_error = ?, not_before = ?, updated_at = ?
-       WHERE id = ?`
-    ).run(finalFailure ? "failed" : "queued", attempts, message, finalFailure ? now : notBefore, now, id);
-    insertAudit(db, finalFailure ? "ingestion_job.failed" : "ingestion_job.retry_queued", "ingestion_job", id, {
-      attempts,
-      error: message,
-    });
-    const updated = statement(db, "SELECT * FROM ingestion_jobs WHERE id = ?").get(id) as Row;
-    return ingestionJobFromRow(updated);
-  });
-}
-
-export function getIngestionQueueStats(): IngestionQueueStats {
-  return withDb((db) => {
-    const rows = statement(db, "SELECT status, COUNT(*) AS count FROM ingestion_jobs GROUP BY status").all() as Row[];
-    const stats: IngestionQueueStats = { queued: 0, processing: 0, completed: 0, failed: 0 };
-    for (const row of rows) {
-      const status = String(row.status) as keyof IngestionQueueStats;
-      if (status in stats) stats[status] = Number(row.count);
-    }
-    return stats;
-  });
-}
-
-export function listIngestionJobs(options: PageOptions = {}): IngestionJobRecord[] {
-  const { limit, offset } = normalizePage(options, 50, 200);
-  return withDb((db) =>
-    statement(db, "SELECT * FROM ingestion_jobs ORDER BY created_at DESC LIMIT ? OFFSET ?")
-      .all(limit, offset)
-      .map((row) => ingestionJobFromRow(row as Row))
-  );
-}
+export const claimIngestionJobs = queue.claim;
+export const completeIngestionJob = queue.complete;
+export const failIngestionJob = queue.fail;
+export const getIngestionQueueStats = queue.stats;
+export const listIngestionJobs = queue.list;
