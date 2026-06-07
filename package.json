@@ -9,9 +9,12 @@
     "pnpm": ">=10"
   },
   "scripts": {
+    "bootstrap": "node scripts/bootstrap.mjs && pnpm --filter @inky/core build",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
+    "dev": "pnpm --filter @perry/core dev",
+    "standup": "pnpm --filter @inky/core standup",
     "perry": "pnpm --filter @perry/core",
     "inky": "pnpm --filter @inky/core"
   }

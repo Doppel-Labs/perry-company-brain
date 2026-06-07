@@ -52,22 +52,50 @@ GET /api/brain/activity-standup   # runs Inky's GitHub-activity standup
 so GitHub activity becomes first-class Company-Brain knowledge alongside meeting
 decisions and action items.
 
-## Develop
+## Quickstart
 
-This is a [pnpm](https://pnpm.io) workspace on **Node 24**.
+One toolchain, one install, one set of commands — all from the **repo root**
+(the [pnpm](https://pnpm.io) workspace). Requires **Node 24** and pnpm via
+[corepack](https://nodejs.org/api/corepack.html).
 
 ```sh
-pnpm install                      # install all packages
-pnpm build                        # build every package (topological: @inky/core first)
-pnpm typecheck                    # typecheck every package
-pnpm test                         # test every package
-
-pnpm perry dev                    # run Perry (bot + admin server)  [pnpm --filter @perry/core]
-pnpm inky standup                 # run an Inky standup             [pnpm --filter @inky/core]
+corepack enable          # pin pnpm to the version in package.json
+pnpm install             # install the whole workspace
+pnpm bootstrap               # create local .env/config from examples + build @inky/core
+#   → fill in packages/perry/.env, inky/.env, and inky/inky.config.json
+pnpm dev                 # run Perry (bot + admin server)
+pnpm standup             # run an Inky GitHub-activity standup
 ```
 
-See [`packages/perry/README.md`](packages/perry/README.md) and
-[`inky/README.md`](inky/README.md) for component-specific setup.
+That's the canonical path. Every command runs from the root — never `cd` into a
+package or into `inky/`:
+
+| Command | What it does |
+|---|---|
+| `pnpm bootstrap` | create local env/config from examples (idempotent) + build `@inky/core` |
+| `pnpm build` | build every package, in dependency order (`@inky/core` first) |
+| `pnpm typecheck` / `pnpm test` | across every package |
+| `pnpm dev` | run Perry (`@perry/core`) |
+| `pnpm standup` | run an Inky standup (`@inky/core`) |
+| `pnpm perry <script>` · `pnpm inky <script>` | run any script in a package |
+
+### Environment
+
+`pnpm bootstrap` copies the checked-in examples to local files (never overwriting):
+
+| File | Holds |
+|---|---|
+| `packages/perry/.env` | Perry secrets — Discord, Notion, Together.ai |
+| `inky/.env` | Inky secrets — GitHub token, LLM provider key |
+| `inky/inky.config.json` | Inky's org / repos / schedule (non-secret) |
+
+To drive Inky **through Perry** (`GET /api/brain/activity-standup`), Perry's
+process also needs `GITHUB_TOKEN` and an `inky.config.json` (point at it with
+`INKY_CONFIG_PATH`).
+
+Component-specific detail lives in
+[`packages/perry/README.md`](packages/perry/README.md) and
+[`inky/README.md`](inky/README.md).
 
 ## License
 

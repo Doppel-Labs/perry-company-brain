@@ -5,9 +5,8 @@
   "description": "Your team's daily standup, written for you. A Discord bot that reads org GitHub activity and writes the standup automatically. (pnpm workspace root — the self-hostable tool lives in packages/core.)",
   "type": "module",
   "license": "MIT",
-  "packageManager": "pnpm@10.33.0",
   "engines": {
-    "node": ">=20",
+    "node": ">=24",
     "pnpm": ">=10"
   },
   "scripts": {
