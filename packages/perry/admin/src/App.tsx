@@ -479,6 +479,14 @@ export function App() {
     [issues, selectedIssueId]
   );
 
+  async function apiFetch(input: string, init?: RequestInit): Promise<Response> {
+    const headers = new Headers(init?.headers);
+    if (adminToken && !headers.has("authorization")) {
+      headers.set("authorization", `Bearer ${adminToken}`);
+    }
+    return window.fetch(input, { ...init, headers });
+  }
+
   async function loadEverything() {
     setStatus("loading");
     setError("");
@@ -500,20 +508,20 @@ export function App() {
         sampleResponse,
       ] =
         await Promise.all([
-        fetch("/api/config"),
-        fetch("/api/diagnostics"),
-        fetch("/api/meetings/history"),
-        fetch("/api/brain/decisions?limit=12"),
-        fetch("/api/brain/actions?limit=12"),
-        fetch("/api/approvals?status=pending"),
-        fetch("/api/users?limit=24"),
-        fetch("/api/issues?limit=24&status=open"),
-        fetch("/api/pivots?limit=8"),
-        fetch("/api/graph-sync/jobs?limit=5"),
-        fetch("/api/graph-sync/change-sets?limit=8"),
-        fetch("/api/brain/graph/entities?q=wallace&limit=8"),
-        fetch("/api/brain/graph/facts?active=true&limit=8"),
-        fetch("/api/granola/sample"),
+        apiFetch("/api/config"),
+        apiFetch("/api/diagnostics"),
+        apiFetch("/api/meetings/history"),
+        apiFetch("/api/brain/decisions?limit=12"),
+        apiFetch("/api/brain/actions?limit=12"),
+        apiFetch("/api/approvals?status=pending"),
+        apiFetch("/api/users?limit=24"),
+        apiFetch("/api/issues?limit=24&status=open"),
+        apiFetch("/api/pivots?limit=8"),
+        apiFetch("/api/graph-sync/jobs?limit=5"),
+        apiFetch("/api/graph-sync/change-sets?limit=8"),
+        apiFetch("/api/brain/graph/entities?q=wallace&limit=8"),
+        apiFetch("/api/brain/graph/facts?active=true&limit=8"),
+        apiFetch("/api/granola/sample"),
       ]);
       if (!configResponse.ok) throw new Error(`Config load failed: ${configResponse.status}`);
       if (!diagnosticsResponse.ok) throw new Error(`Diagnostics load failed: ${diagnosticsResponse.status}`);
@@ -570,7 +578,7 @@ export function App() {
     setStatus("saving");
     setError("");
     try {
-      const response = await fetch("/api/config", {
+      const response = await apiFetch("/api/config", {
         method: "PUT",
         headers: {
           "content-type": "application/json",
@@ -606,18 +614,18 @@ export function App() {
       graphEntitiesResponse,
       graphFactsResponse,
     ] = await Promise.all([
-      fetch("/api/diagnostics"),
-      fetch("/api/meetings/history"),
-      fetch("/api/brain/decisions?limit=12"),
-      fetch("/api/brain/actions?limit=12"),
-      fetch("/api/approvals?status=pending"),
-      fetch("/api/users?limit=24"),
-      fetch("/api/issues?limit=24&status=open"),
-      fetch("/api/pivots?limit=8"),
-      fetch("/api/graph-sync/jobs?limit=5"),
-      fetch("/api/graph-sync/change-sets?limit=8"),
-      fetch(`/api/brain/graph/entities?q=${encodeURIComponent(graphEntityQuery)}&limit=8`),
-      fetch("/api/brain/graph/facts?active=true&limit=8"),
+      apiFetch("/api/diagnostics"),
+      apiFetch("/api/meetings/history"),
+      apiFetch("/api/brain/decisions?limit=12"),
+      apiFetch("/api/brain/actions?limit=12"),
+      apiFetch("/api/approvals?status=pending"),
+      apiFetch("/api/users?limit=24"),
+      apiFetch("/api/issues?limit=24&status=open"),
+      apiFetch("/api/pivots?limit=8"),
+      apiFetch("/api/graph-sync/jobs?limit=5"),
+      apiFetch("/api/graph-sync/change-sets?limit=8"),
+      apiFetch(`/api/brain/graph/entities?q=${encodeURIComponent(graphEntityQuery)}&limit=8`),
+      apiFetch("/api/brain/graph/facts?active=true&limit=8"),
     ]);
     if (diagnosticsResponse.ok) setDiagnostics((await diagnosticsResponse.json()) as Diagnostics);
     if (historyResponse.ok) setHistory(((await historyResponse.json()) as { records: MeetingRecord[] }).records);
@@ -644,7 +652,7 @@ export function App() {
 
   async function actOnApproval(id: string, action: "approve" | "reject") {
     setError("");
-    const response = await fetch(`/api/approvals/${encodeURIComponent(id)}/${action}`, {
+    const response = await apiFetch(`/api/approvals/${encodeURIComponent(id)}/${action}`, {
       method: "POST",
       headers: {
         ...(adminToken ? { authorization: `Bearer ${adminToken}` } : {}),
@@ -661,7 +669,7 @@ export function App() {
     setIssueActionStatus("projecting");
     setError("");
     try {
-      const response = await fetch("/api/brain/project-multiplayer?limit=25000", {
+      const response = await apiFetch("/api/brain/project-multiplayer?limit=25000", {
         method: "POST",
         headers: {
           ...(adminToken ? { authorization: `Bearer ${adminToken}` } : {}),
@@ -681,7 +689,7 @@ export function App() {
     setIssueActionStatus("creating");
     setError("");
     try {
-      const response = await fetch("/api/issues", {
+      const response = await apiFetch("/api/issues", {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -712,7 +720,7 @@ export function App() {
     setIssueActionStatus("updating");
     setError("");
     try {
-      const response = await fetch(`/api/issues/${encodeURIComponent(issue.id)}`, {
+      const response = await apiFetch(`/api/issues/${encodeURIComponent(issue.id)}`, {
         method: "PATCH",
         headers: {
           "content-type": "application/json",
@@ -733,7 +741,7 @@ export function App() {
   }
 
   async function refreshIssueEvents(issueId: string) {
-    const response = await fetch(`/api/issues/${encodeURIComponent(issueId)}/events?limit=50`);
+    const response = await apiFetch(`/api/issues/${encodeURIComponent(issueId)}/events?limit=50`);
     if (response.ok) setIssueEvents(((await response.json()) as { records: IssueEventRecord[] }).records);
   }
 
@@ -758,9 +766,9 @@ export function App() {
             return `/api/brain/ontology?${params.toString()}`;
           })();
     const [summaryResponse, queryResponse, healthResponse] = await Promise.all([
-      fetch("/api/brain/ontology"),
-      fetch(queryUrl),
-      fetch("/api/brain/ontology/health?changeSetLimit=100"),
+      apiFetch("/api/brain/ontology"),
+      apiFetch(queryUrl),
+      apiFetch("/api/brain/ontology/health?changeSetLimit=100"),
     ]);
     if (summaryResponse.ok) setOntologySummary(((await summaryResponse.json()) as OntologySummaryResponse).summary);
     if (healthResponse.ok) setOntologyHealth((await healthResponse.json()) as OntologyHealthResponse);
@@ -777,7 +785,7 @@ export function App() {
 
   async function loadOntologyEvidence(stableKey: string) {
     setOntologyStatus("evidence");
-    const response = await fetch(`/api/brain/ontology/evidence?stableKey=${encodeURIComponent(stableKey)}`);
+    const response = await apiFetch(`/api/brain/ontology/evidence?stableKey=${encodeURIComponent(stableKey)}`);
     if (!response.ok) {
       setError(`Ontology evidence failed: ${response.status}`);
       setOntologyStatus("idle");
@@ -791,7 +799,7 @@ export function App() {
       setBrainResults([]);
       return;
     }
-    const response = await fetch(`/api/brain/search?q=${encodeURIComponent(brainQuery)}&limit=10`);
+    const response = await apiFetch(`/api/brain/search?q=${encodeURIComponent(brainQuery)}&limit=10`);
     if (!response.ok) {
       setError(`Brain search failed: ${response.status}`);
       return;
@@ -804,7 +812,7 @@ export function App() {
       setGraphResults([]);
       return;
     }
-    const response = await fetch(`/api/brain/graph/search?q=${encodeURIComponent(graphQuery)}&limit=10`);
+    const response = await apiFetch(`/api/brain/graph/search?q=${encodeURIComponent(graphQuery)}&limit=10`);
     if (!response.ok) {
       setError(`Graph search failed: ${response.status}`);
       return;
@@ -815,7 +823,7 @@ export function App() {
   }
 
   async function searchGraphEntities() {
-    const response = await fetch(`/api/brain/graph/entities?q=${encodeURIComponent(graphEntityQuery)}&limit=12`);
+    const response = await apiFetch(`/api/brain/graph/entities?q=${encodeURIComponent(graphEntityQuery)}&limit=12`);
     if (!response.ok) {
       setError(`Graph entity search failed: ${response.status}`);
       return;
@@ -836,8 +844,8 @@ export function App() {
   async function refreshGraphEntityContext(stableKey: string) {
     const encoded = encodeURIComponent(stableKey);
     const [contextResponse, timelineResponse] = await Promise.all([
-      fetch(`/api/brain/graph/entities/${encoded}/context?limit=12`),
-      fetch(`/api/brain/graph/timeline?stableKey=${encoded}&limit=12`),
+      apiFetch(`/api/brain/graph/entities/${encoded}/context?limit=12`),
+      apiFetch(`/api/brain/graph/timeline?stableKey=${encoded}&limit=12`),
     ]);
     if (contextResponse.ok) {
       const payload = (await contextResponse.json()) as GraphEntityContextResponse;
@@ -855,7 +863,7 @@ export function App() {
     setGraphActionStatus("backfilling");
     setError("");
     try {
-      const response = await fetch("/api/graph-sync/backfill?limit=500", {
+      const response = await apiFetch("/api/graph-sync/backfill?limit=500", {
         method: "POST",
         headers: {
           ...(adminToken ? { authorization: `Bearer ${adminToken}` } : {}),
@@ -874,7 +882,7 @@ export function App() {
     setGraphActionStatus("draining");
     setError("");
     try {
-      const response = await fetch("/api/graph-sync/drain?limit=25", {
+      const response = await apiFetch("/api/graph-sync/drain?limit=25", {
         method: "POST",
         headers: {
           ...(adminToken ? { authorization: `Bearer ${adminToken}` } : {}),
@@ -892,7 +900,7 @@ export function App() {
     setReplayingGraphChangeSetId(id);
     setError("");
     try {
-      const response = await fetch(`/api/graph-sync/change-sets/${encodeURIComponent(id)}/replay`, {
+      const response = await apiFetch(`/api/graph-sync/change-sets/${encodeURIComponent(id)}/replay`, {
         method: "POST",
         headers: {
           ...(adminToken ? { authorization: `Bearer ${adminToken}` } : {}),
@@ -916,7 +924,7 @@ export function App() {
     setPreviewStatus("loading");
     setError("");
     try {
-      const response = await fetch("/api/granola/preview", {
+      const response = await apiFetch("/api/granola/preview", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: samplePayload,
@@ -934,7 +942,7 @@ export function App() {
     setPreviewStatus("posting");
     setError("");
     try {
-      const response = await fetch("/api/granola/zapier?dryRun=true", {
+      const response = await apiFetch("/api/granola/zapier?dryRun=true", {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -955,10 +963,24 @@ export function App() {
   if (!settings) {
     return (
       <main className="shell">
-        <div className="loading">
-          <Loader2 className="spin" size={24} />
-          <span>Loading Perry</span>
-        </div>
+        <section className="panel">
+          <h1>Perry Admin</h1>
+          <form onSubmit={(event) => { event.preventDefault(); void loadEverything(); }}>
+            <label htmlFor="admin-sign-in-token">Admin API token</label>
+            <input
+              id="admin-sign-in-token"
+              className="token-input"
+              type="password"
+              autoComplete="off"
+              value={adminToken}
+              onChange={(event) => setAdminToken(event.target.value)}
+            />
+            <button className="primary" type="submit" disabled={status === "loading"}>
+              {status === "loading" ? "Connecting" : "Connect"}
+            </button>
+          </form>
+          {error ? <div className="alert" role="alert">{error}</div> : null}
+        </section>
       </main>
     );
   }
@@ -2218,20 +2240,3 @@ function csv(value: string): string[] {
     .map((item) => item.trim())
     .filter(Boolean);
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

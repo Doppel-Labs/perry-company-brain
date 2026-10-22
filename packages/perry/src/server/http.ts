@@ -3,6 +3,7 @@ import { startFtsWorker } from "@brain";
 import { startGraphSyncWorker } from "@graph";
 import { startIngestionWorker } from "@ingestion";
 import { sendJson, sendJsonBuffer, serveStatic } from "./http-util";
+import { authorizeApiRequest } from "./http-auth";
 import { handleGraphSync } from "./routes/graph-sync";
 import { handleIngestion } from "./routes/ingestion";
 import { handleContent } from "./routes/content";
@@ -34,8 +35,9 @@ export function startAdminServer(port = Number(process.env.PORT ?? 8787)): void 
   }
 
   const server = createAdminHttpServer();
-  server.listen(port, () => {
-    console.log(`Perry admin server listening on http://localhost:${port}`);
+  const host = process.env.ADMIN_HOST || "127.0.0.1";
+  server.listen(port, host, () => {
+    console.log(`Perry admin server listening on http://${host}:${port}`);
   });
 }
 
@@ -57,6 +59,7 @@ export function createAdminHttpServer(): Server {
 
 async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+  authorizeApiRequest(req, url.pathname);
   if (await handleGraphSync(req, res, url)) return;
   if (await handleIngestion(req, res, url)) return;
   if (await handleContent(req, res, url)) return;
