@@ -67,20 +67,33 @@ test("benchmark and strict gauntlet authenticate only the intended services", as
   }
 });
 
-test("benchmark refuses redirects without disclosing either credential to the redirect target", async () => {
-  let leaked = 0;
-  const target = createServer((req, res) => { leaked++; req.resume(); res.end("{}"); });
-  target.listen(0, "127.0.0.1"); await once(target, "listening");
-  const targetUrl = "http://127.0.0.1:" + (target.address() as { port: number }).port;
-  const redirect = createServer((req, res) => { req.resume(); res.writeHead(302, { location: targetUrl + "/capture" }); res.end(); });
-  redirect.listen(0, "127.0.0.1"); await once(redirect, "listening");
-  try {
-    const result = await runScript("perf-http.cjs", { ADMIN_API_TOKEN: "redirect-test-admin", GRANOLA_WEBHOOK_TOKEN: "redirect-test-webhook",
-      PERRY_PERF_URL: "http://127.0.0.1:" + (redirect.address() as { port: number }).port, PERRY_HTTP_REQUESTS: "1", PERRY_HTTP_WARMUP: "0" });
-    assert.equal(result.code, 1);
-    assert.equal(leaked, 0);
-  } finally {
-    target.closeAllConnections(); redirect.closeAllConnections();
-    await Promise.all([new Promise<void>(r => target.close(() => r())), new Promise<void>(r => redirect.close(() => r()))]);
+test("benchmark refuses admin and webhook redirects without leaking credentials", async () => {
+  for (const redirectPath of ["/api/health", "/api/granola/zapier?dryRun=true"]) {
+    let leaked = 0;
+    let redirectedHeaders: Record<string, unknown> | undefined;
+    const target = createServer((req, res) => { leaked++; req.resume(); res.end("{}"); });
+    target.listen(0, "127.0.0.1"); await once(target, "listening");
+    const targetUrl = "http://127.0.0.1:" + (target.address() as { port: number }).port;
+    const redirect = createServer((req, res) => {
+      req.resume();
+      if (req.url === redirectPath) {
+        redirectedHeaders = req.headers;
+        res.writeHead(302, { location: targetUrl + "/capture" });
+      } else res.setHeader("content-type", "application/json");
+      res.end("{}");
+    });
+    redirect.listen(0, "127.0.0.1"); await once(redirect, "listening");
+    try {
+      const result = await runScript("perf-http.cjs", { ADMIN_API_TOKEN: "redirect-test-admin", GRANOLA_WEBHOOK_TOKEN: "redirect-test-webhook",
+        PERRY_PERF_URL: "http://127.0.0.1:" + (redirect.address() as { port: number }).port, PERRY_HTTP_REQUESTS: "1", PERRY_HTTP_WARMUP: "0" });
+      assert.equal(result.code, 1);
+      assert.ok(redirectedHeaders, "must reach the credential-bearing endpoint");
+      if (redirectPath === "/api/health") assert.equal(redirectedHeaders.authorization, "Bearer redirect-test-admin");
+      else assert.equal(redirectedHeaders["x-perry-webhook-token"], "redirect-test-webhook");
+      assert.equal(leaked, 0);
+    } finally {
+      target.closeAllConnections(); redirect.closeAllConnections();
+      await Promise.all([new Promise<void>(r => target.close(() => r())), new Promise<void>(r => redirect.close(() => r()))]);
+    }
   }
 });
