@@ -306,8 +306,7 @@ function slugKey(value: string): string {
 }
 
 export function hasBrainCommandAccess(input: { roleIds: string[]; adminRoleIds: string[] }): boolean {
-  if (input.adminRoleIds.length === 0) return true;
-  return input.roleIds.some((roleId) => input.adminRoleIds.includes(roleId));
+  return input.roleIds.some((roleId) => roleId.trim().length > 0 && input.adminRoleIds.includes(roleId));
 }
 
 function interactionRoleIds(interaction: ChatInputCommandInteraction): string[] {

@@ -57,15 +57,20 @@ async function timedConcurrent(name, fn) {
 }
 
 async function get(path) {
-  const response = await fetch(`${baseUrl}${path}`);
+  const response = await fetch(`${baseUrl}${path}`, { headers: path === "/api/ping" ? {} : adminHeaders(), redirect: "error" });
   if (!response.ok) throw new Error(`${path} failed: ${response.status}`);
   await response.arrayBuffer();
 }
 
-async function post(path, payload) {
+function adminHeaders() {
+  return { authorization: `Bearer ${process.env.ADMIN_API_TOKEN}` };
+}
+
+async function post(path, payload, webhook = false) {
   const response = await fetch(`${baseUrl}${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...(webhook ? { "x-perry-webhook-token": process.env.GRANOLA_WEBHOOK_TOKEN } : adminHeaders()) },
+    redirect: "error",
     body: JSON.stringify(payload),
   });
   if (!response.ok) throw new Error(`${path} failed: ${response.status}`);
@@ -85,6 +90,9 @@ function print(result) {
 }
 
 async function main() {
+  if (!process.env.ADMIN_API_TOKEN || !process.env.GRANOLA_WEBHOOK_TOKEN) {
+    throw new Error("Configure ADMIN_API_TOKEN and GRANOLA_WEBHOOK_TOKEN before running the HTTP benchmark");
+  }
   console.log(`Perry HTTP benchmark`);
   console.log(`URL: ${baseUrl}`);
   console.log(`Requests: ${requests}, warmup: ${warmup}, concurrency: ${concurrency}`);
@@ -104,7 +112,7 @@ async function main() {
   results.push(await timedConcurrent("POST granola preview", (index) => post("/api/granola/preview", syntheticMeetingNote(index))));
   results.push(
     await timedConcurrent("POST granola dry-run", (index) =>
-      post("/api/granola/zapier?dryRun=true", syntheticMeetingNote(index))
+      post("/api/granola/zapier?dryRun=true", syntheticMeetingNote(index), true)
     )
   );
 

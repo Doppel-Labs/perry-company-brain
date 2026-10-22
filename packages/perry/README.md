@@ -107,10 +107,12 @@ Required secrets:
 - `DISCORD_TOKEN`
 - `NOTION_TOKEN`
 
-Recommended server secrets:
+Admin/API authentication secrets:
 
 - `ADMIN_API_TOKEN`
-- `GRANOLA_WEBHOOK_TOKEN`
+- `GRANOLA_WEBHOOK_TOKEN` (required when using the Granola webhook)
+
+Set `DISCORD_ADMIN_ROLE_IDS` or the admin role list in `data/perry.config.json` before enabling `/brain`; an empty list denies all brain commands. Existing persisted settings take precedence over environment defaults, so check the effective role list in the admin panel.
 
 Editable operational settings:
 
