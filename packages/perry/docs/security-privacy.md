@@ -4,7 +4,7 @@ Perry handles meeting-derived operational memory. The safe default is to move st
 
 ## Discord
 
-- `/brain` commands are open only when no Discord admin roles are configured.
+- `/brain` commands deny access when no Discord admin roles are configured. Only members with an explicitly configured role can query company knowledge.
 - Configure `DISCORD_ADMIN_ROLE_IDS` or admin role ids in `data/perry.config.json` before using `/brain` in a real guild.
 - Brain replies are ephemeral to reduce channel noise and accidental broad disclosure.
 - Route public summaries to project channels; keep raw source notes and private notes outside Discord posts.
@@ -47,3 +47,14 @@ Rotate a token after sharing logs, screenshots, or config files that may have in
 - The server binds to `127.0.0.1` by default. Set `ADMIN_HOST=0.0.0.0` only when intentionally exposing it behind HTTPS and appropriate network controls.
 - The Granola Zapier endpoint requires `GRANOLA_WEBHOOK_TOKEN`, independently of the admin token. A missing webhook token disables that endpoint.
 - `/api/ping` remains a public health probe and contains no company data. Configuration, diagnostics, meeting history, search, and graph endpoints require authentication.
+
+## Request limits and operational clients
+
+- JSON bodies, including Granola webhooks, are limited to 2 MiB of streamed bytes; oversized requests return 413 and close the connection. Invalid JSON returns 400.
+- The admin server limits complete request receipt to 30 seconds and headers to 10 seconds. Edge rate limits and distributed quotas remain hosting controls.
+- `pnpm perf:http` requires both `ADMIN_API_TOKEN` and `GRANOLA_WEBHOOK_TOKEN`. Admin requests use the admin bearer token, while `/api/granola/zapier` uses only the webhook token.
+- `pnpm ops:local-brain-gauntlet --strict` authenticates company-data reads. Admin credentials are not attached to Graphiti or LM Studio checks. Operational HTTP clients reject redirects rather than forwarding credentials.
+
+## Runtime
+
+Use patched Node.js 24.22.1 or a newer security-patched Node 24 release. The repository version files pin 24.22.1; rebuild/restart existing hosts and verify the running process with `node --version`. A source pin does not update an already-running deployment.

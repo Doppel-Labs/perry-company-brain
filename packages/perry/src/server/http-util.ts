@@ -8,15 +8,7 @@ export const staticRoot = join(process.cwd(), "admin", "dist");
 
 export { requireAdmin, requireWebhook } from "./http-auth";
 
-export async function readJson(req: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  }
-  const raw = Buffer.concat(chunks).toString("utf8");
-  if (!raw) return {};
-  return JSON.parse(raw);
-}
+export { readJson } from "./http-body";
 
 export function sendJson(res: ServerResponse, status: number, payload: unknown): void {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8" });

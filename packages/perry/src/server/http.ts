@@ -42,7 +42,7 @@ export function startAdminServer(port = Number(process.env.PORT ?? 8787)): void 
 }
 
 export function createAdminHttpServer(): Server {
-  return createServer(async (req, res) => {
+  return createServer({ requestTimeout: 30_000, headersTimeout: 10_000 }, async (req, res) => {
     try {
       if (req.method === "GET" && req.url === "/api/ping") {
         sendJsonBuffer(res, 200, pingBody);
@@ -52,6 +52,7 @@ export function createAdminHttpServer(): Server {
     } catch (error) {
       const status = typeof (error as { status?: unknown }).status === "number" ? (error as { status: number }).status : 500;
       if (status >= 500) console.error(error);
+      if (status === 413) res.setHeader("connection", "close");
       sendJson(res, status, { error: error instanceof Error ? error.message : "Internal server error" });
     }
   });
