@@ -6,22 +6,7 @@ import { type CompanyOntologyEntityType, getOntologyIndex, queryArtifacts, query
 
 export const staticRoot = join(process.cwd(), "admin", "dist");
 
-export function requireAdmin(req: IncomingMessage): void {
-  const token = process.env.ADMIN_API_TOKEN;
-  if (!token) return;
-  const provided = req.headers.authorization?.replace(/^Bearer\s+/iu, "") ?? req.headers["x-admin-token"];
-  if (provided !== token) {
-    throw httpError(401, "Unauthorized");
-  }
-}
-
-export function requireWebhook(req: IncomingMessage): void {
-  const token = process.env.GRANOLA_WEBHOOK_TOKEN;
-  if (!token) return;
-  if (req.headers["x-perry-webhook-token"] !== token) {
-    throw httpError(401, "Unauthorized webhook");
-  }
-}
+export { requireAdmin, requireWebhook } from "./http-auth";
 
 export async function readJson(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];

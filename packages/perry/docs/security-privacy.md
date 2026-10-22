@@ -38,3 +38,12 @@ Required production-like secrets are environment variables, not committed files:
 - `LMSTUDIO_API_KEY` if your local server requires it
 
 Rotate a token after sharing logs, screenshots, or config files that may have included it.
+
+
+## Admin HTTP access
+
+- Set `ADMIN_API_TOKEN` before running the admin server. Every company-data API read and mutation requires this token; a missing token returns 503 rather than disabling authentication.
+- Enter the token on the admin panel's Connect form. It stays in React memory for the current page and is sent in the Authorization header; it is not written to browser storage.
+- The server binds to `127.0.0.1` by default. Set `ADMIN_HOST=0.0.0.0` only when intentionally exposing it behind HTTPS and appropriate network controls.
+- The Granola Zapier endpoint requires `GRANOLA_WEBHOOK_TOKEN`, independently of the admin token. A missing webhook token disables that endpoint.
+- `/api/ping` remains a public health probe and contains no company data. Configuration, diagnostics, meeting history, search, and graph endpoints require authentication.
