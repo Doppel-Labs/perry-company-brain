@@ -23,6 +23,9 @@ test("registers bounded Perry brain slash commands", () => {
 test("allows brain commands only for configured admin roles", () => {
   assert.equal(hasBrainCommandAccess({ roleIds: [], adminRoleIds: [] }), false);
   assert.equal(hasBrainCommandAccess({ roleIds: ["engineering"], adminRoleIds: [] }), false);
+  assert.equal(hasBrainCommandAccess({ roleIds: [], adminRoleIds: ["brain-admin"] }), false);
+  assert.equal(hasBrainCommandAccess({ roleIds: [""], adminRoleIds: [""] }), false);
+  assert.equal(hasBrainCommandAccess({ roleIds: [" "], adminRoleIds: ["brain-admin", " "] }), false);
   assert.equal(hasBrainCommandAccess({ roleIds: ["engineering"], adminRoleIds: ["brain-admin"] }), false);
   assert.equal(hasBrainCommandAccess({ roleIds: ["brain-admin", "engineering"], adminRoleIds: ["brain-admin"] }), true);
 });
