@@ -155,7 +155,9 @@ A release candidate should have:
 
 **Perry refuses to start with "Refusing to bind the admin server".** `ADMIN_HOST` is a non-loopback address and `ADMIN_API_TOKEN` is not set. Set the token, or bind to `127.0.0.1`.
 
-**Every API call returns `401`.** Either the client is not sending the token, or the request is not considered local: a reverse proxy adds `X-Forwarded-For`, or the `Host` header is not a loopback name. Send `ADMIN_API_TOKEN`.
+**Every API call returns `401`.** The client is not sending `ADMIN_API_TOKEN`, or is sending a different value from the server's. Check for whitespace or a stale token in the admin UI; it asks again after a page reload.
+
+**Every API call returns `503`.** The server has no `ADMIN_API_TOKEN` (or `GRANOLA_WEBHOOK_TOKEN`, for the webhook). Run `pnpm bootstrap` to generate them, or set them in the host's environment, then restart Perry.
 
 **The browser shows `Admin app has not been built yet`.** The server serves the UI from `admin/dist`. Run `pnpm build` (or `pnpm admin:build`), or use `pnpm admin:dev` during development.
 
