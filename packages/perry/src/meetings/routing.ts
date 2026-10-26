@@ -1,6 +1,13 @@
+// meetings/routing — picks where a meeting goes (project, Discord channel,
+// Notion data source) and how it is published.
+//
+// Every active rule is scored against the note and the highest score wins; a
+// tie keeps the earlier rule in settings order (Array.sort is stable). A rule's
+// unset destinations fall back to the default meeting channel and data source.
 import type { AppSettings, RoutingRuleConfig } from "@core";
 import type { MeetingNote } from "./note";
 
+/** The routing decision for one meeting; `reason` is a human-readable explanation for the admin UI and logs. */
 export interface MeetingRoute {
   ruleId?: string;
   ruleName?: string;
@@ -11,6 +18,7 @@ export interface MeetingRoute {
   reason: string;
 }
 
+/** Returns the best-scoring active rule's route, or the default settings route when no rule scores above zero. Pure. */
 export function resolveMeetingRoute(note: MeetingNote, settings: AppSettings): MeetingRoute {
   const matchingRule = settings.routingRules
     .filter((rule) => rule.isActive !== false)
@@ -38,6 +46,8 @@ export function resolveMeetingRoute(note: MeetingNote, settings: AppSettings): M
   };
 }
 
+// Folder match is worth 8, each title keyword hit 4, each attendee email hit 3,
+// all case-insensitive. Keywords match as substrings of the title.
 function scoreRule(rule: RoutingRuleConfig, note: MeetingNote): number {
   let score = 0;
   const title = note.title.toLowerCase();

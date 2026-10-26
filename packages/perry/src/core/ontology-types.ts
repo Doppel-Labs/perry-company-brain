@@ -1,3 +1,10 @@
+// core/ontology-types — the shared vocabulary of the company-brain graph.
+//
+// Every graph write is expressed as a GraphChangeSet built from these types
+// (see graph/change-set.ts), so adding an entity or relation type starts here.
+// The meaning of each type is documented in docs/company-brain-ontology.md.
+
+/** Every node type the graph can hold: meeting work, company state, and integration/provenance surfaces. */
 export type GraphEntityType =
   | "meeting"
   | "person"
@@ -22,6 +29,7 @@ export type GraphEntityType =
   | "discord_message"
   | "source_note";
 
+/** Every edge type the graph can hold; subjects and objects are referenced by entity stableKey. */
 export type GraphRelationType =
   | "CAPTURED_BY"
   | "ATTENDED_BY"
@@ -55,6 +63,7 @@ export type GraphRelationType =
   | "POSTED_TO"
   | "DERIVED_FROM";
 
+/** Create-or-update for one entity, identified by `stableKey`, citing the evidence that supports it. */
 export interface GraphEntityUpsert {
   type: GraphEntityType;
   stableKey: string;
@@ -64,6 +73,7 @@ export interface GraphEntityUpsert {
   evidenceIds: string[];
 }
 
+/** Asserts an edge as true from `validFrom`, with a 0..1 confidence and one supporting evidence id. */
 export interface GraphRelationAssertion {
   subjectKey: string;
   relation: GraphRelationType;
@@ -74,6 +84,7 @@ export interface GraphRelationAssertion {
   properties?: Record<string, string | number | boolean | null>;
 }
 
+/** Ends a previously asserted edge at `validUntil` (e.g. an owner handover) without deleting its history. */
 export interface GraphRelationRetirement {
   subjectKey: string;
   relation: GraphRelationType;
@@ -83,6 +94,7 @@ export interface GraphRelationRetirement {
   reason: string;
 }
 
+/** A short, bounded citation back to the source record that justifies entities and relations. */
 export interface GraphEvidenceLink {
   evidenceId: string;
   kind: "meeting" | "decision" | "action_item" | "source_link";
@@ -94,6 +106,7 @@ export interface GraphEvidenceLink {
   url?: string;
 }
 
+/** All graph changes derived from one meeting, applied as a unit; `warnings` are non-blocking gaps. */
 export interface GraphChangeSet {
   schemaVersion: 1;
   sourceMeetingId: string;
@@ -111,11 +124,13 @@ export interface GraphChangeSetValidation {
   warnings: string[];
 }
 
+/** The company-state subset (goals, risks, features, ...) that turns the graph from a meeting archive into a company brain. */
 export type CompanyOntologyEntityType = Extract<
   GraphEntityType,
   "goal" | "metric" | "risk" | "blocker" | "open_question" | "capability" | "feature" | "artifact" | "benchmark_report"
 >;
 
+/** Runtime list of CompanyOntologyEntityType, for validation and iteration. */
 export const companyOntologyEntityTypes: readonly CompanyOntologyEntityType[] = [
   "goal",
   "metric",
