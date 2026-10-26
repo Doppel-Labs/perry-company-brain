@@ -6,14 +6,27 @@
     "folderName": "Wallace",
     "startedAt": "2026-05-23T15:00:00.000Z",
     "attendees": [
-      { "name": "Ada" },
-      { "name": "Ben" }
+      {
+        "name": "Ada"
+      },
+      {
+        "name": "Ben"
+      }
     ],
     "summaryMarkdown": "Decisions:\n- Ship the Wallace graph replay diff and expose missing readback details in the admin panel.\n- Keep Discord brain commands limited to the brain-admin role.\n\nAction items:\n- Ada: Add Discord brain ACL tests by Friday.\n- Ben: Validate repository doppel-labs/perry-discord-bot and customer Acme routing evidence.",
     "expected": {
-      "decisionKeywords": ["graph replay diff", "brain-admin"],
-      "actionKeywords": ["Discord brain ACL", "Validate repository"],
-      "entityKeywords": ["doppel-labs/perry-discord-bot", "Acme"]
+      "decisionKeywords": [
+        "graph replay diff",
+        "brain-admin"
+      ],
+      "actionKeywords": [
+        "Discord brain ACL",
+        "Validate repository"
+      ],
+      "entityKeywords": [
+        "doppel-labs/perry-discord-bot",
+        "Acme"
+      ]
     }
   },
   {
@@ -23,14 +36,57 @@
     "folderName": "Perry",
     "startedAt": "2026-05-23T16:00:00.000Z",
     "attendees": [
-      { "name": "Maya" },
-      { "name": "Iris" }
+      {
+        "name": "Maya"
+      },
+      {
+        "name": "Iris"
+      }
     ],
     "summaryMarkdown": "Decisions:\n- Notion decisions, action items, and projects will use separate data sources with Perry dry-run write contracts before production writes.\n- LM Studio evaluation should compare local Gemma settings using bounded extraction prompts.\n\nAction items:\n- Maya: Run the strict local brain gauntlet after Graphiti is online.\n- Iris: Document backup and restore steps for Perry SQLite and Graphiti Neo4j.",
     "expected": {
-      "decisionKeywords": ["separate data sources", "LM Studio evaluation"],
-      "actionKeywords": ["strict local brain gauntlet", "backup and restore"],
-      "entityKeywords": ["Notion", "Graphiti"]
+      "decisionKeywords": [
+        "separate data sources",
+        "LM Studio evaluation"
+      ],
+      "actionKeywords": [
+        "strict local brain gauntlet",
+        "backup and restore"
+      ],
+      "entityKeywords": [
+        "Notion",
+        "Graphiti"
+      ]
+    }
+  },
+  {
+    "id": "prose-launch-retro",
+    "title": "Atlas launch retro",
+    "calendarTitle": "Atlas weekly",
+    "folderName": "Atlas",
+    "startedAt": "2026-06-04T16:00:00.000Z",
+    "attendees": [
+      {
+        "name": "Priya"
+      },
+      {
+        "name": "Marco"
+      }
+    ],
+    "summaryMarkdown": "The team walked through the Atlas launch. Decision-making on the pricing page was slow, so going forward the pricing page copy is owned by marketing rather than engineering. After some back and forth the group settled on moving the public beta to June 18 so the Stripe webhook retries can land first. Priya is going to write the incident postmortem for the checkout outage, and Marco will pair with Northwind's admin to migrate their workspace before the beta.",
+    "expected": {
+      "decisionKeywords": [
+        "pricing page",
+        "june 18"
+      ],
+      "actionKeywords": [
+        "postmortem",
+        "northwind"
+      ],
+      "entityKeywords": [
+        "Northwind",
+        "Atlas"
+      ]
     }
   }
 ]
