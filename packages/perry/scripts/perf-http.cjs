@@ -5,6 +5,8 @@ const baseUrl = process.env.PERRY_PERF_URL ?? "http://localhost:8787";
 const requests = Number(process.env.PERRY_HTTP_REQUESTS ?? process.argv[2] ?? 100);
 const warmup = Number(process.env.PERRY_HTTP_WARMUP ?? 10);
 const concurrency = Number(process.env.PERRY_HTTP_CONCURRENCY ?? process.argv[3] ?? 1);
+const authHeaders = process.env.ADMIN_API_TOKEN ? { authorization: `Bearer ${process.env.ADMIN_API_TOKEN}` } : {};
+const webhookHeaders = process.env.GRANOLA_WEBHOOK_TOKEN ? { "x-perry-webhook-token": process.env.GRANOLA_WEBHOOK_TOKEN } : {};
 
 async function timed(name, fn) {
   const samples = [];
@@ -57,7 +59,7 @@ async function timedConcurrent(name, fn) {
 }
 
 async function get(path) {
-  const response = await fetch(`${baseUrl}${path}`);
+  const response = await fetch(`${baseUrl}${path}`, { headers: authHeaders });
   if (!response.ok) throw new Error(`${path} failed: ${response.status}`);
   await response.arrayBuffer();
 }
@@ -65,7 +67,7 @@ async function get(path) {
 async function post(path, payload) {
   const response = await fetch(`${baseUrl}${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...authHeaders, ...webhookHeaders },
     body: JSON.stringify(payload),
   });
   if (!response.ok) throw new Error(`${path} failed: ${response.status}`);

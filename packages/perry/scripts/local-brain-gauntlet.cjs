@@ -47,7 +47,9 @@ function adminHeaders() {
 }
 
 async function checkJson(name, url, options = {}) {
-  const headers = { accept: "application/json", ...(options.headers ?? {}) };
+  // Every admin route except /api/ping requires the token, so admin checks always carry it.
+  const auth = url.startsWith(adminUrl) ? adminHeaders() : {};
+  const headers = { accept: "application/json", ...auth, ...(options.headers ?? {}) };
   try {
     const started = performance.now();
     const response = await fetch(url, { method: options.method ?? "GET", headers });
