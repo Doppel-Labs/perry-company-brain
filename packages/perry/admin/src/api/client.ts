@@ -1,29 +1,23 @@
 // api/client — the only module that calls fetch. Holds the admin bearer token
-// (mirrored to sessionStorage, so it survives a reload but not closing the tab) and the
-// error-handling combinators the hooks compose: throw, `optional`, `orReportError`.
-const adminTokenStorageKey = "perry.adminToken";
+// and the error-handling combinators the hooks compose: throw, `optional`,
+// `orReportError`.
+//
+// The token lives in memory only. It is never written to localStorage or
+// sessionStorage, so it disappears with the page and cannot be read back from
+// browser storage later; reloading the page asks for it again.
+//
 // Module state, not React state: `apiFetch` reads it on every call, so a token
 // typed into the UI applies to the very next request without re-rendering.
-let currentAdminToken = readStoredAdminToken();
+let currentAdminToken = "";
 
-/** The token saved for this tab, or "" when none is saved or storage is blocked. */
-export function readStoredAdminToken(): string {
-  try {
-    return window.sessionStorage.getItem(adminTokenStorageKey) ?? "";
-  } catch {
-    return "";
-  }
+/** The token in use for this page, or "" before one is entered. */
+export function currentToken(): string {
+  return currentAdminToken;
 }
 
-/** Use `value` for subsequent requests and persist it for this tab; "" clears it. */
-export function storeAdminToken(value: string): void {
+/** Use `value` for subsequent requests; "" clears it. */
+export function setAdminTokenForRequests(value: string): void {
   currentAdminToken = value;
-  try {
-    if (value) window.sessionStorage.setItem(adminTokenStorageKey, value);
-    else window.sessionStorage.removeItem(adminTokenStorageKey);
-  } catch {
-    // Storage unavailable (private mode); the token still lives for this page.
-  }
 }
 
 /** Every admin API call carries the admin token — reads are protected too. */
