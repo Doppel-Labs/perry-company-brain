@@ -1,3 +1,13 @@
+// ontology-health — consistency checks between graph change sets and the materialized ontology tables.
+//
+// Everything is sampled: each table is read up to its own limit (capped at
+// 200 change sets, 1000 entities, 2000 relations, 1000 evidence rows). The
+// critical relation-to-evidence check looks the sampled relations' evidence ids
+// up directly, so it is exact for the sample; the warning-level cross-table
+// checks (evidence linkage, project links) can still flag rows whose
+// counterpart simply fell outside the sample. Each check passes or carries a
+// severity; the report is `ok` unless a critical check fails. Offending ids are
+// listed, at most 50 per kind.
 import { companyOntologyEntityTypes, type GraphChangeSet } from "@core";
 import {
   listGraphChangeSets,
@@ -7,10 +17,13 @@ import {
   type OntologyEntityRow,
   type OntologyEvidenceRow,
   type OntologyRelationRow,
+  statement,
+  withDb,
 } from "@store";
 
 export type OntologyHealthSeverity = "pass" | "warning" | "critical";
 
+/** One named check; `severity` is "pass" when it passed, else its configured severity. */
 export interface OntologyHealthCheck {
   id: string;
   severity: OntologyHealthSeverity;
@@ -50,8 +63,16 @@ export interface OntologyHealthReport {
   checks: OntologyHealthCheck[];
 }
 
+/** Entity types the materializer writes; other change-set entities are not expected in the tables. */
 const materializedEntityTypes = new Set<string>(["project", ...companyOntologyEntityTypes]);
 
+/**
+ * Samples change sets and ontology rows and runs the checks: change sets parse
+ * and entities exist (critical), materialized coverage versus what the sampled
+ * change sets imply (warning), relations point at existing evidence (critical),
+ * entities have evidence, evidence is referenced, no duplicate type/name pairs,
+ * and every entity links to a project or meeting (all warning). Read-only.
+ */
 export function getOntologyHealthReport(
   options: { changeSetLimit?: number; entityLimit?: number; relationLimit?: number; evidenceLimit?: number } = {}
 ): OntologyHealthReport {
@@ -68,7 +89,7 @@ export function getOntologyHealthReport(
   const evidence = listOntologyEvidence({ limit: limits.evidence });
 
   const expected = expectedGraphCounts(parsedChangeSets);
-  const evidenceIds = new Set(evidence.map((item) => item.evidenceId));
+  const evidenceIds = existingEvidenceIds(relations.map((relation) => relation.evidenceId).filter(Boolean));
   const relationIdsMissingEvidence = relations
     .filter((relation) => relation.evidenceId && !evidenceIds.has(relation.evidenceId))
     .map(relationKey)
@@ -149,6 +170,7 @@ export function getOntologyHealthReport(
   };
 }
 
+/** Distinct entities (of materialized types), relations, and evidence ids across the change sets. */
 function expectedGraphCounts(changeSets: GraphChangeSet[]): { entities: number; relations: number; evidence: number } {
   const entities = new Set<string>();
   const relations = new Set<string>();
@@ -163,6 +185,21 @@ function expectedGraphCounts(changeSets: GraphChangeSet[]): { entities: number; 
     for (const item of changeSet.evidence) evidence.add(item.evidenceId);
   }
   return { entities: entities.size, relations: relations.size, evidence: evidence.size };
+}
+
+/**
+ * The subset of `evidenceIds` that exist in ontology_evidence, looked up
+ * directly (one query, ids bound as a JSON array) rather than inferred from the
+ * evidence sample, which is smaller than the relation sample.
+ */
+function existingEvidenceIds(evidenceIds: string[]): Set<string> {
+  if (evidenceIds.length === 0) return new Set();
+  const rows = withDb((db) =>
+    statement(db, "SELECT evidence_id FROM ontology_evidence WHERE evidence_id IN (SELECT value FROM json_each(?))").all(
+      JSON.stringify([...new Set(evidenceIds)])
+    )
+  ) as Array<{ evidence_id: string }>;
+  return new Set(rows.map((row) => row.evidence_id));
 }
 
 function findOrphanedEvidence(

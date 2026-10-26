@@ -1,3 +1,8 @@
+// discord-ontology — renders ontology queries as short Markdown replies for /brain.
+//
+// Replies are kept under Discord's 2000-character message limit: at most 10
+// rows, inline excerpts trimmed to 120-140 characters, and the whole reply
+// truncated to 1800. Invalid input yields a usage message rather than an error.
 import {
   queryArtifacts,
   queryBenchmarkReports,
@@ -14,8 +19,9 @@ import {
   type CompanyOntologyEntityType,
   type OntologyEntityRecord,
   type OntologyQueryResult,
-} from "./ontology-queries";
+} from "./ontology";
 
+/** The entity types offered as choices for `/brain state`. */
 export const discordOntologyTypes: readonly CompanyOntologyEntityType[] = [
   "goal",
   "metric",
@@ -28,6 +34,7 @@ export const discordOntologyTypes: readonly CompanyOntologyEntityType[] = [
   "benchmark_report",
 ];
 
+/** Lists entities of one type, optionally scoped to a project and filter text (default 8 rows, max 10). */
 export function formatOntologyState(options: {
   type: CompanyOntologyEntityType;
   project?: string;
@@ -50,6 +57,7 @@ export function formatOntologyState(options: {
   );
 }
 
+/** Lists entities changed since an ISO timestamp (default 8 rows, max 10). */
 export function formatOntologyChangedSince(options: { since: string; project?: string; limit?: number }): string {
   const since = options.since.trim();
   if (!validIso(since)) return "Use an ISO timestamp for `since`, for example `2026-05-25T00:00:00.000Z`.";
@@ -69,6 +77,7 @@ export function formatOntologyChangedSince(options: { since: string; project?: s
   );
 }
 
+/** Shows an entity's relation and evidence counts and its first six evidence items. */
 export function formatOntologyEvidence(stableKey: string): string {
   const key = stableKey.trim();
   if (!key) return "Provide an ontology stable key.";

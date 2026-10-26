@@ -30,7 +30,7 @@ const {
   queryGoals,
   queryRisks,
   summarizeOntology,
-} = require("../dist/brain/ontology-queries.js");
+} = require("../dist/brain/ontology/index.js");
 
 const steps = [];
 let materializedIndex;

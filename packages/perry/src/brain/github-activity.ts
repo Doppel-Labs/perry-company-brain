@@ -1,13 +1,12 @@
-/**
- * Company Brain ⇄ Inky integration: surfaces Inky's GitHub-activity standups
- * inside Perry's brain, so the Company Brain unifies meeting documentation
- * (Perry) with what the team actually shipped in code (Inky).
- *
- * Inky's config loader + domain types come from the built @inky/core barrel
- * (light — no octokit/discord). The heavy collect→summarize→render pipeline
- * lives behind the @inky/core/standup subpath and is loaded lazily, so the
- * brain only pays for those adapters when a standup actually runs.
- */
+// github-activity — GitHub-activity standups from Inky, surfaced in the brain.
+//
+// Company Brain ⇄ Inky integration: the Company Brain unifies meeting
+// documentation (Perry) with what the team actually shipped in code (Inky).
+//
+// Inky's config loader + domain types come from the built @inky/core barrel
+// (light — no octokit/discord). The heavy collect→summarize→render pipeline
+// lives behind the @inky/core/standup subpath and is loaded lazily, so the
+// brain only pays for those adapters when a standup actually runs.
 import { loadConfig, loadSecrets, type Config, type Secrets, type Window } from "@inky/core";
 
 /** The finished standup Inky produces (mirrors @inky/core/standup's BuiltStandup). */

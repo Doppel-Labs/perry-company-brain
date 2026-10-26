@@ -1,3 +1,9 @@
+// queries — the structured query surface over meetings, decisions, and action items.
+//
+// Every query is a pure function over a QueryContext (all rows loaded into
+// memory once), so a caller running many queries — the query CLI, gauntlets,
+// tests — loads the store once and passes the same context to each. "Project"
+// matching is a normalized substring match on the record text, not a foreign key.
 import {
   listActionItems,
   listDecisions,
@@ -9,7 +15,9 @@ import {
   type MeetingRecord,
 } from "@store";
 import { parseOwnershipDecision } from "./insights";
+import { paged } from "./paging";
 
+/** The in-memory snapshot every query reads from; see getQueryContext. */
 export interface QueryContext {
   meetings: MeetingRecord[];
   decisions: DecisionRecord[];
@@ -64,6 +72,10 @@ export interface StaleActionsResult {
   actions: Array<ActionItemRecord & { ageDays: number; overdue: boolean }>;
 }
 
+/**
+ * `ownership_conflict`: one subject given different owners by decisions with the
+ * same createdAt. `duplicate_decision_theme`: many decisions share one normalized theme.
+ */
 export interface ConflictResult {
   type: "ownership_conflict" | "duplicate_decision_theme";
   subject: string;
@@ -80,14 +92,20 @@ export interface ChangedSinceResult {
   actions: ActionItemRecord[];
 }
 
+/** Loads up to `limit` meetings, decisions, and action items (each, newest first) from the store. */
 export function getQueryContext(limit = 100_000): QueryContext {
   return {
-    meetings: paged((offset) => listMeetingRecords({ limit: 1000, offset }), limit),
-    decisions: paged((offset) => listDecisions(5000, offset), limit),
-    actions: paged((offset) => listActionItems(5000, offset), limit),
+    meetings: paged((offset, pageSize) => listMeetingRecords({ limit: pageSize, offset }), limit, 1000),
+    decisions: paged((offset, pageSize) => listDecisions(pageSize, offset), limit, 5000),
+    actions: paged((offset, pageSize) => listActionItems(pageSize, offset), limit, 5000),
   };
 }
 
+/**
+ * Everything matching a project name: meetings by title, decisions by text,
+ * actions by text or owner, plus open-action owners and a full-text search.
+ * Lists are capped (20 meetings, 20 decisions, 50 open actions); counts are not.
+ */
 export function queryProjectState(input: ProjectStateQuery, context = getQueryContext()): ProjectStateResult {
   const project = input.project.trim();
   const meetings = context.meetings.filter((meeting) => matchesText(meeting.title, project));
@@ -112,6 +130,11 @@ export function queryProjectState(input: ProjectStateQuery, context = getQueryCo
   };
 }
 
+/**
+ * Open actions owned by exactly `owner`. An action is overdue when its due date
+ * is before today (UTC); stale when it has no due date and is at least
+ * `staleActionDays` (default 30) old. Projects are inferred from a fixed name list.
+ */
 export function queryOwnerLoad(owner: string, context = getQueryContext(), options: { now?: string; staleActionDays?: number } = {}): OwnerLoadResult {
   const now = new Date(options.now ?? new Date().toISOString());
   const staleActionDays = Math.max(1, Math.trunc(options.staleActionDays ?? 30));
@@ -127,6 +150,10 @@ export function queryOwnerLoad(owner: string, context = getQueryContext(), optio
   };
 }
 
+/**
+ * Decisions mentioning `subject`, oldest first, with any ownership parsed out of
+ * them; `currentOwner` is the owner named by the latest ownership decision.
+ */
 export function queryDecisionHistory(subject: string, context = getQueryContext()): DecisionHistoryResult {
   const decisions = sortByCreatedAsc(
     context.decisions.filter((decision) => matchesText(decision.text, subject))
@@ -147,6 +174,10 @@ export function queryDecisionHistory(subject: string, context = getQueryContext(
   };
 }
 
+/**
+ * Open actions that are overdue, or undated and at least `staleActionDays` old,
+ * optionally filtered by exact owner or project text. Overdue first, then oldest.
+ */
 export function queryStaleActions(context = getQueryContext(), options: { now?: string; staleActionDays?: number; owner?: string; project?: string } = {}): StaleActionsResult {
   const now = new Date(options.now ?? new Date().toISOString());
   const staleActionDays = Math.max(1, Math.trunc(options.staleActionDays ?? 30));
@@ -164,6 +195,10 @@ export function queryStaleActions(context = getQueryContext(), options: { now?: 
   return { now: now.toISOString(), staleActionDays, actions };
 }
 
+/**
+ * Same-timestamp ownership conflicts plus decision themes repeated at least
+ * `duplicateThemeThreshold` times (default 10, minimum 2).
+ */
 export function queryConflicts(context = getQueryContext(), options: { duplicateThemeThreshold?: number } = {}): ConflictResult[] {
   return [
     ...sameTimeOwnershipConflicts(context.decisions),
@@ -171,6 +206,7 @@ export function queryConflicts(context = getQueryContext(), options: { duplicate
   ];
 }
 
+/** Meetings, decisions, and actions created at or after `since`, optionally project-filtered; 100 of each, newest first. */
 export function queryChangedSince(since: string, context = getQueryContext(), options: { project?: string } = {}): ChangedSinceResult {
   const sinceDate = new Date(since);
   const project = options.project?.trim();
@@ -268,6 +304,7 @@ function normalizeText(value: string): string {
   return value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").replace(/\s+/gu, " ").trim();
 }
 
+/** A theme key: the first eight normalized words, minus stop words, numbers, and single characters. */
 function analyticsKey(value: string): string {
   const stop = new Set(["a", "an", "and", "by", "for", "from", "in", "is", "of", "on", "the", "to", "with"]);
   return normalizeText(value)
@@ -297,19 +334,6 @@ function sortByCreatedDesc<T extends { createdAt: string; id: string }>(items: T
 
 function sortByCreatedAsc<T extends { createdAt: string; id: string }>(items: T[]): T[] {
   return [...items].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
-}
-
-function paged<T>(readPage: (offset: number) => T[], limit: number): T[] {
-  const out: T[] = [];
-  let offset = 0;
-  while (out.length < limit) {
-    const page = readPage(offset);
-    if (page.length === 0) break;
-    out.push(...page.slice(0, limit - out.length));
-    offset += page.length;
-    if (page.length < 1000) break;
-  }
-  return out;
 }
 
 function unique(values: string[]): string[] {
