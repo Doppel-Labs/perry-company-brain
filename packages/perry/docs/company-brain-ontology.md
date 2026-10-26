@@ -1,62 +1,55 @@
 # Company Brain Ontology
 
-Perry's graph model is intentionally operational: it tracks company state, why it changed, and what evidence proves it. The graph should not become a raw transcript dump. Meetings, decisions, actions, docs, benchmarks, and tool outputs should become typed objects with bounded evidence.
+The ontology is Perry's typed model of company state: what the company is trying to do, what stands in the way, what it is building, and the evidence behind each claim. This document describes the entity and relation types, how they are extracted, how to query them, and how to verify the index. Read it if you are building on the `/api/brain/ontology` or `/api/brain/tools` endpoints, the `/brain state` command, or the extraction code.
 
-## Current Core Entities
+## Why typed objects
 
-- `meeting`: a Granola meeting Perry processed.
-- `person`: creator, attendee, owner, assignee, reviewer.
-- `project`: routed project or inferred product/work area.
-- `decision`: accepted/proposed decision extracted from a meeting.
-- `action_item`: extracted follow-up work from a meeting.
-- `repository`, `customer`, `policy`: operating objects mentioned by the team.
-- `channel`, `data_source`, `notion_page`, `discord_message`, `source_note`: integration and provenance surfaces.
+The graph should never become a raw transcript dump. Meetings, decisions, actions, documents, benchmarks, and tool output become typed objects with short, bounded evidence. Discord, the admin UI, and language models then work with those objects directly. A model asks for a project's state, an owner's load, a decision's history, or what changed since yesterday, instead of loading a pile of meeting text.
 
-## Richer Company-State Entities
+The rule for every consumer is the same: **typed object queries first, global search second.**
 
-The richer ontology adds the objects that make Perry useful as a company brain rather than a meeting archive:
+## Entity types
 
-- `goal`: desired outcome, OKR, objective, or target.
-- `metric`: KPI, SLO, p50/p95/p99 latency, quality measure, or scale target.
-- `risk`: future bad state or accepted uncertainty.
-- `blocker`: current dependency preventing progress.
-- `open_question`: unresolved decision point.
-- `capability`: durable workflow or power the company is building.
-- `feature`: specific product or system behavior.
-- `artifact`: document, config, dashboard, prompt, DB, report file, or other concrete work product.
-- `benchmark_report`: empirical performance or evaluation artifact.
+The core types capture meetings and the work that comes out of them:
 
-## Important Relations
+| Type | Meaning |
+|---|---|
+| `meeting` | A Granola meeting Perry processed. |
+| `person` | A creator, attendee, owner, assignee, or reviewer. |
+| `project` | A routed project, or an inferred product or work area. |
+| `decision` | A proposed or accepted decision from a meeting. |
+| `action_item` | Follow-up work from a meeting. |
+| `repository`, `customer`, `policy` | Operating objects the team mentions. |
+| `channel`, `data_source`, `notion_page`, `discord_message`, `source_note` | Integration and provenance surfaces. |
 
-Meeting and provenance relations:
+The company-state types are what make Perry a company brain rather than a meeting archive:
 
-- `CAPTURED_BY`, `ATTENDED_BY`, `DERIVED_FROM`
-- `ROUTED_TO_PROJECT`, `ROUTED_TO_CHANNEL`, `WRITES_TO_DATA_SOURCE`
-- `DOCUMENTED_IN`, `POSTED_TO`
+| Type | Meaning |
+|---|---|
+| `goal` | A desired outcome, OKR, objective, or target. |
+| `metric` | A KPI, SLO, latency percentile, quality measure, or scale target. |
+| `risk` | A possible future bad state, or an accepted uncertainty. |
+| `blocker` | A current dependency preventing progress. |
+| `open_question` | An unresolved decision point. |
+| `capability` | A durable workflow or power the company is building. |
+| `feature` | A specific product or system behavior. |
+| `artifact` | A document, config, dashboard, prompt, database, report, or other concrete work product. |
+| `benchmark_report` | An empirical performance or evaluation result. |
 
-Work and ownership relations:
+## Relation types
 
-- `HAS_DECISION`, `HAS_ACTION_ITEM`
-- `ASSIGNED_TO`, `ASSIGNED_OWNER`, `HAS_FALLBACK_REVIEWER`
+| Group | Relations |
+|---|---|
+| Meeting and provenance | `CAPTURED_BY`, `ATTENDED_BY`, `DERIVED_FROM`, `ROUTED_TO_PROJECT`, `ROUTED_TO_CHANNEL`, `WRITES_TO_DATA_SOURCE`, `DOCUMENTED_IN`, `POSTED_TO` |
+| Work and ownership | `HAS_DECISION`, `HAS_ACTION_ITEM`, `ASSIGNED_TO`, `ASSIGNED_OWNER`, `HAS_FALLBACK_REVIEWER` |
+| Mentions | `MENTIONS_REPOSITORY`, `MENTIONS_CUSTOMER`, `REFERENCES_POLICY`, `MENTIONS_GOAL`, `MENTIONS_METRIC`, `MENTIONS_RISK`, `MENTIONS_BLOCKER`, `MENTIONS_OPEN_QUESTION`, `MENTIONS_CAPABILITY`, `MENTIONS_FEATURE`, `REFERENCES_ARTIFACT`, `REFERENCES_BENCHMARK_REPORT` |
+| Company state | `SUPPORTS_GOAL` (project to goal), `HAS_RISK` (project to risk), `BLOCKED_BY` (project to blocker), `HAS_OPEN_QUESTION` (project to question), `IMPLEMENTS_CAPABILITY` (project or feature to capability), `VALIDATED_BY` (feature, metric, or artifact to benchmark report) |
 
-Operating-object relations:
+## Extraction
 
-- `MENTIONS_REPOSITORY`, `MENTIONS_CUSTOMER`, `REFERENCES_POLICY`
-- `MENTIONS_GOAL`, `MENTIONS_METRIC`, `MENTIONS_RISK`, `MENTIONS_BLOCKER`, `MENTIONS_OPEN_QUESTION`
-- `MENTIONS_CAPABILITY`, `MENTIONS_FEATURE`, `REFERENCES_ARTIFACT`, `REFERENCES_BENCHMARK_REPORT`
+Two sources feed the ontology. When `PERRY_EXTRACTION_MODE` is `llm` or `hybrid`, the model's grounded repository, customer, and policy entities become `MENTIONS_REPOSITORY`, `MENTIONS_CUSTOMER`, and `REFERENCES_POLICY` relations from the meeting, at confidence 0.7. They share stable keys with the pattern extractor below, so an entity found both ways is stored once. See [Extraction](architecture.md#extraction) for how model output is grounded.
 
-Company-state relations:
-
-- `SUPPORTS_GOAL`: project to goal.
-- `HAS_RISK`: project to risk.
-- `BLOCKED_BY`: project to blocker.
-- `HAS_OPEN_QUESTION`: project to unresolved question.
-- `IMPLEMENTS_CAPABILITY`: project or feature to capability.
-- `VALIDATED_BY`: feature, metric, or artifact to benchmark report.
-
-## Extraction Contract
-
-The current deterministic extractor recognizes explicit operating language such as:
+The pattern extractor is deterministic and always runs. It recognizes explicit, labelled operating language in a meeting summary:
 
 ```text
 Goal: reduce search p95 below 20 ms.
@@ -70,39 +63,55 @@ Artifact: reports/db/gemma-5000-fast.sqlite.
 Benchmark report: Gemma 5000 Query Gauntlet.
 ```
 
-This is deliberate. Perry should prefer explicit company-state labels over guessing from vague lowercase prose. LLM extraction can later generate these labels as structured operations, but graph insertion should remain typed, validated, and evidence-backed.
+This is deliberate. Perry prefers explicit labels over guessing from vague prose. Even a labelled value must name something specific to become an entity: a capital letter after its first character (a proper noun or acronym, not just sentence case), a digit, path or identifier punctuation (`/`, `_`, `#`, `-`), a technical unit such as `p95`, `ms`, or `sqlite`, or else at least three content words. "Feature: adaptive search retries" qualifies; "Goal: make it better" and "Goal: Improve things" do not.
 
-## Product Rule
+Every stable key is built by `normalizeStableKey` in `@core` (lowercase, URL scheme dropped, other runs of characters collapsed to `-`, at most 160 characters). Project keys come from `projectStableKey`, so `Wallace` is always `project:wallace`, whether the graph builder, an ontology project filter, `/brain project`, or the Notion wiki sync builds it.
 
-For Discord/admin/model answers, use typed object queries first and global search second. A model should ask for project state, owner load, decision history, conflicts, stale work, or changed-since context instead of loading a giant raw meeting context. The ontology exists so fast tools can manipulate company objects directly.
-## Query Surface
+An LLM may later produce these labels as structured operations, but what enters the graph stays typed, validated, and backed by evidence.
 
-Ontology objects are materialized into indexed SQLite tables when graph change sets are queued. This gives Discord, the admin panel, and model tools a fast local read path without reparsing historical change-set JSON on every request. If a database has not been backfilled yet, the query module can still fall back to persisted graph change sets.
+## Where the ontology lives
 
-Library module:
+Ontology objects travel inside [graph change sets](graphiti-integration.md#change-sets). When a valid change set is stored, Perry materializes it into an indexed SQLite read model, so queries never re-parse change-set JSON. Change sets that failed validation are kept only for review: they are never materialized, and neither the backfill below nor the query layer's fallback reads them. The read model has four tables:
 
-- `src/companyBrainOntologyQueries.ts`
-- `getOntologyIndex(limit)`
-- `queryGoals`, `queryMetrics`, `queryRisks`, `queryBlockers`, `queryOpenQuestions`
-- `queryCapabilities`, `queryFeatures`, `queryArtifacts`, `queryBenchmarkReports`
-- `queryEvidenceFor(stableKey)`
-- `queryOntologyChangedSince(since, options)`
+| Table | Holds |
+|---|---|
+| `ontology_entities` | Stable key, type, name, aliases, properties, evidence IDs, source meetings, timestamps. |
+| `ontology_relations` | Subject, relation, object, evidence, confidence, source meeting, timestamps. |
+| `ontology_evidence` | Bounded proof records from meetings, decisions, actions, Notion, Discord, or Granola. |
+| `ontology_entity_evidence` | The many-to-many link between entities and evidence. |
 
-Admin API:
+Change sets are only built when graph memory is enabled (`PERRY_GRAPHITI_ENABLED=true` with a bridge URL), so with graph memory off, the ontology stays empty. For a database that has change sets but no materialized rows, the query layer falls back to parsing the stored change sets, and `company-brain:ontology-backfill` rebuilds the index:
+
+```sh
+pnpm company-brain:ontology-backfill -- --limit 100000 --report reports/ontology/backfill.json --markdown reports/ontology/backfill.md
+```
+
+By default it clears and rebuilds the whole index. `--incremental true` keeps existing rows, `--changed-since <ISO timestamp>` replays only recently updated change sets, `--dry-run true` estimates impact without writing, and `--db <path>` targets another database.
+
+## Querying the ontology
+
+The query functions live in the `@brain` module (`getOntologyIndex`, `queryGoals`, `queryRisks`, and so on for each type, plus `queryEvidenceFor` and `queryOntologyChangedSince`). They are exposed three ways.
+
+**Admin API.** The ontology endpoints return entities with their incoming and outgoing relations and evidence excerpts, shaped for the admin UI:
 
 ```text
-GET /api/brain/ontology
+GET /api/brain/ontology                                          # type counts and most-linked projects
 GET /api/brain/ontology?type=risk&project=Wallace&limit=25
 GET /api/brain/ontology?type=goal&q=latency
 GET /api/brain/ontology/evidence?stableKey=goal:reduce-search-p95-below-20-ms
 GET /api/brain/ontology/changed-since?since=2026-05-25T00:00:00.000Z
+GET /api/brain/ontology/health?changeSetLimit=100
+```
+
+**Agent tool contracts.** The `/api/brain/tools/*` endpoints return compact, stable payloads meant for model tool calls: entity references, counts, relation references, and capped evidence excerpts, never UI-shaped payloads or raw meeting context.
+
+```text
 GET /api/brain/tools/project-state?project=Wallace&types=goal,risk,blocker
 GET /api/brain/tools/changed-since?since=2026-05-25T00:00:00.000Z&project=Wallace
 GET /api/brain/tools/evidence?stableKey=goal:reduce-search-p95-below-20-ms
 ```
 
-The summary endpoint returns type counts and the most-linked projects. The typed endpoint returns bounded entities with incoming/outgoing relations and evidence excerpts. The evidence endpoint returns the evidence and relations for a stable graph key. The changed-since endpoint is intended for low-latency agent/tool refreshes after a meeting is processed. The `/api/brain/tools/*` endpoints return compact, stable contracts for model tool calls: entity references, counts, relation refs, and capped evidence excerpts instead of UI-shaped payloads or raw meeting context.
-Discord command surface:
+**Discord.** The `/brain` command reads the same index. Replies are bounded and ephemeral:
 
 ```text
 /brain state type:risk project:Wallace limit:5
@@ -110,88 +119,40 @@ Discord command surface:
 /brain evidence entity:goal:reduce-search-p95-below-20-ms
 ```
 
-These commands are intentionally bounded and ephemeral. They return typed objects, counts, and evidence snippets from the local ontology index instead of sending raw meeting context into Discord.
+The admin UI's Ontology Cockpit offers the same reads with type and project filters, a changed-since view, search, and an evidence drawer that mirrors `/brain evidence`.
 
+## Verifying the ontology
 
-## Materialized Index
+All of these run against `dist/`, so run `pnpm build` first.
 
-SQLite now owns a local ontology read model:
+**Health report.** `GET /api/brain/ontology/health` checks a sample of change sets for parse errors, then reports entity, relation, and evidence coverage, missing evidence links, orphaned evidence, duplicate type-and-name groups, and project and meeting link coverage. Critical failures mean model and Discord answers should not be trusted; warnings are signals to repair or backfill.
 
-- `ontology_entities`: stable key, type, name, aliases, properties, evidence IDs, source meeting IDs, timestamps.
-- `ontology_relations`: subject, relation, object, evidence, confidence, source meeting, timestamps.
-- `ontology_evidence`: bounded proof records from meetings, decisions, actions, Notion, Discord, or Granola.
-- `ontology_entity_evidence`: many-to-many entity/evidence lookup.
+**Ontology gauntlet.** Processes one synthetic meeting and proves project-scoped queries for goals, risks, blockers, open questions, capabilities, and evidence. It last passed in about 40 to 50 ms (2026-05-25).
 
-Backfill existing databases after `pnpm build`. By default this clears and rebuilds the materialized ontology index from all graph change sets:
-
-```powershell
-pnpm company-brain:ontology-backfill -- --limit 100000 --report reports/ontology/backfill.json --markdown reports/ontology/backfill.md
-```
-
-Use `--db .tmp/ontology-backfill-smoke.sqlite` for isolated smoke runs. Use `--dry-run true` to estimate impact without writing, `--incremental true` to avoid clearing current ontology rows, and `--changed-since 2026-05-25T00:00:00.000Z` to only replay recently updated change sets. The admin app includes an Ontology Cockpit panel for type/project-filtered reads, changed-since inspection, search, and an evidence drawer that mirrors `/brain evidence`.
-
-## Agent Tool Contract Gauntlet
-
-After `pnpm build`, run the LLM-tool contract gauntlet:
-
-```powershell
-pnpm agent-tools:gauntlet -- --report reports/agent-tools/contract-gauntlet.json --markdown reports/agent-tools/contract-gauntlet.md
-```
-
-The gauntlet processes one synthetic Granola meeting with private-note and transcript leak markers, then calls the compact tool contracts for project state, changed-since, evidence, and ontology health. It fails if payloads exceed the byte budget, calls exceed the latency budget, evidence excerpts exceed the cap, required relations/evidence are missing, or private/transcript markers leak into tool payloads.
-
-## Ontology Health
-
-Operators and admin UI can inspect ontology materialization drift through:
-
-```text
-GET /api/brain/ontology/health?changeSetLimit=100
-```
-
-The report checks sampled graph change-set parsing, materialized entity/relation/evidence coverage, missing evidence links, orphaned evidence, duplicate type/name groups, and project/meeting link coverage. Critical failures should block trust in model/Discord answers; warnings are repair/backfill signals.
-## Persistent Corpus Gauntlet
-
-For a reusable on-disk corpus with ontology rows and agent-tool calls, run after `pnpm build`:
-
-```powershell
-pnpm agent-tools:corpus-gauntlet -- --reset true --limit 250 --db reports/db/agent-tool-corpus.sqlite --report reports/agent-tools/corpus-gauntlet.json --markdown reports/agent-tools/corpus-gauntlet.md
-```
-
-This differs from the fast meeting corpus builder: it ingests through the workflow with direct graph change sets enabled, rebuilds the materialized ontology index, and then runs project-state, changed-since, evidence, and health calls against a persistent SQLite DB. Re-run with `--ingest false` omitted only when the DB already exists and you want to reuse it.
-
-## Repair Dry Run
-
-Ontology repair is dry-run by default:
-
-```powershell
-pnpm ontology:repair -- --db reports/db/agent-tool-corpus.sqlite --report reports/ontology/repair-dry-run.json --markdown reports/ontology/repair-dry-run.md
-```
-
-Use `--apply true` to rebuild the materialized ontology index from graph change sets. The repair report includes the health checks, planned actions, and backfill counts. Duplicate entity groups and unprojected entities are intentionally reported for review instead of being auto-mutated.
-## Performance Harness
-
-After `pnpm build`, compare indexed ontology reads with the legacy JSON-parse path:
-
-```powershell
-pnpm perf:ontology -- --count 1000 --budget-materialized-project-goals-ms 5 --budget-materialized-evidence-ms 2 --report reports/performance/ontology-perf-1000.json --markdown reports/performance/ontology-perf-1000.md
-```
-
-The harness generates synthetic graph change sets, lets the store materialize ontology rows, then times materialized entity/relation reads, summary and project queries, evidence lookup, and the legacy change-set JSON parse/index path. Optional `--budget-*` flags make the run fail when a key read exceeds its latency budget. This is the acceptance test for keeping Discord/model tool calls bounded to indexed object reads instead of large context reconstruction.
-## Ontology Gauntlet
-
-Run the local ontology gauntlet after `pnpm build`:
-
-```powershell
+```sh
 pnpm company-brain:ontology-gauntlet -- --report reports/ontology/local-gauntlet.json --markdown reports/ontology/local-gauntlet.md
 ```
 
-Latest local result on 2026-05-25: passed in `51.8 ms`. The gauntlet processed one synthetic Wallace meeting, persisted one graph change set, and proved project-scoped queries for goal, risk, blocker, open question, capability, and evidence.
+**Agent tool contract gauntlet.** Processes a synthetic meeting seeded with private-note and transcript markers, then calls the project-state, changed-since, evidence, and health contracts. It fails if a payload exceeds its byte budget, a call exceeds its latency budget, an evidence excerpt exceeds its cap, required relations or evidence are missing, or a private or transcript marker leaks into a tool payload.
 
+```sh
+pnpm agent-tools:gauntlet -- --report reports/agent-tools/contract-gauntlet.json --markdown reports/agent-tools/contract-gauntlet.md
+```
 
+**Persistent corpus gauntlet.** Builds a reusable on-disk corpus by ingesting meetings through the real workflow with direct change sets enabled, rebuilds the ontology index, and runs the tool contracts against it. It ingests when you pass `--reset true` or `--ingest true`, or when the database file does not exist yet; otherwise it reuses the existing database.
 
+```sh
+pnpm agent-tools:corpus-gauntlet -- --reset true --limit 250 --db reports/db/agent-tool-corpus.sqlite --report reports/agent-tools/corpus-gauntlet.json --markdown reports/agent-tools/corpus-gauntlet.md
+```
 
+**Repair.** Reports health, planned actions, and backfill counts. It is a dry run unless you pass `--apply true`, which rebuilds the index from change sets. Duplicate entity groups and unprojected entities are reported for review, never changed automatically.
 
+```sh
+pnpm ontology:repair -- --db reports/db/agent-tool-corpus.sqlite --report reports/ontology/repair-dry-run.json --markdown reports/ontology/repair-dry-run.md
+```
 
+**Performance.** Generates synthetic change sets and times materialized reads (entities, relations, summary, project queries, evidence) against the older parse-the-JSON path. `--budget-*` flags fail the run when a read exceeds its budget. This is the acceptance test for keeping Discord and model tool calls on indexed reads.
 
-
-
+```sh
+pnpm perf:ontology -- --count 1000 --budget-materialized-project-goals-ms 5 --budget-materialized-evidence-ms 2 --report reports/performance/ontology-perf-1000.json --markdown reports/performance/ontology-perf-1000.md
+```

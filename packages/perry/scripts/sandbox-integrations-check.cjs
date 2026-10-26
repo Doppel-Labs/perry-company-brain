@@ -1,4 +1,4 @@
-const { slashCommandData } = require("../dist/discord/client.js");
+const { slashCommandData } = require("../dist/discord/commands.js");
 const { createMeetingNotePage } = require("../dist/notion/meetings.js");
 const {
   syncActionItemRecordToNotion,

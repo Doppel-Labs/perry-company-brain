@@ -1,3 +1,17 @@
+// change-set — builds the typed graph change set for one processed meeting.
+//
+// A change set is a bounded list of operations derived deterministically from
+// the meeting, so the graph never has to infer the company from prose:
+// `entities` (upserts keyed by a stable key such as `meeting:<id>` or
+// `person:<email>`), `relations` (subject–relation–object assertions with a
+// confidence and validFrom), `retirements` (relations that end, e.g. a previous
+// owner), `evidence` (short excerpts and URLs that every entity, relation and
+// retirement cites by evidenceId), and `warnings` (non-blocking gaps).
+// `schemaVersion` is 1; replay rejects stored JSON with any other version.
+//
+// Stable keys are derived only from source ids, URLs, emails and names, so
+// rebuilding the same meeting yields the same keys and the graph upserts rather
+// than duplicates. The types live in @core and are re-exported here.
 import { parseOwnershipDecision } from "@brain";
 export type {
   GraphChangeSet,
@@ -25,6 +39,14 @@ import { assertRelation, dedupeRelations, dedupeRetirements, personEntity, upser
 import { cleanProperties, compactExcerpt, inferProject, inferProjectFromText, normalizeKey, personKey, projectStableKey, unique, validIso } from "./change-set-helpers";
 import { addMentionedOperatingObjects } from "./change-set-mentions";
 
+/**
+ * Builds the change set for a meeting: the meeting itself, its Granola source,
+ * creator and attendees, routed project/channel/data source, mentioned ontology
+ * objects, decisions (with owner assignments and retirements parsed from
+ * ownership decisions), action items, and the Notion page and Discord post.
+ * Pure: no I/O. referenceTime (the relations' validFrom) is the meeting start,
+ * falling back to the record's updatedAt, then now. Does not validate.
+ */
 export function buildGraphChangeSet(input: GraphMemorySyncInput): GraphChangeSet {
   const generatedAt = new Date().toISOString();
   const referenceTime = validIso(input.note.startedAt) ?? input.record.updatedAt ?? generatedAt;
@@ -35,6 +57,8 @@ export function buildGraphChangeSet(input: GraphMemorySyncInput): GraphChangeSet
   const evidence: GraphEvidenceLink[] = [];
   const warnings: string[] = [];
 
+  // The meeting entity and its evidence anchor everything else; most relations
+  // below cite meetingEvidenceId.
   const meetingKey = `meeting:${sourceMeetingId}`;
   const meetingEvidenceId = `evidence:meeting:${sourceMeetingId}`;
   evidence.push({
@@ -140,6 +164,8 @@ export function buildGraphChangeSet(input: GraphMemorySyncInput): GraphChangeSet
 
   addMentionedOperatingObjects(entities, relations, input, meetingKey, meetingEvidenceId, referenceTime, projectName);
 
+  // Decisions and action items are keyed by their 1-based position in the
+  // meeting, so each gets its own evidence record carrying the item text.
   input.knowledge.decisions.forEach((decision, index) => {
     const evidenceId = `evidence:decision:${sourceMeetingId}:${index + 1}`;
     const decisionKey = `decision:${sourceMeetingId}:${index + 1}`;
@@ -170,6 +196,9 @@ export function buildGraphChangeSet(input: GraphMemorySyncInput): GraphChangeSet
     });
     if (!ownership) return;
 
+    // An ownership decision ("X now owns Y") becomes ASSIGNED_OWNER on the
+    // project named in its subject, else on the meeting's project. With no
+    // project at all it is recorded as a warning, not an error.
     const subjectProjectName = inferProjectFromText(ownership.subject) ?? projectName;
     if (!subjectProjectName) {
       warnings.push(`Ownership decision had no resolvable project: ${decision.text}`);
@@ -193,6 +222,7 @@ export function buildGraphChangeSet(input: GraphMemorySyncInput): GraphChangeSet
       })
     );
 
+    // A handover retires the previous owner's ASSIGNED_OWNER as of this meeting.
     if (ownership.previousOwner && ownership.previousOwner !== ownership.owner) {
       const previousOwnerKey = personKey(ownership.previousOwner);
       upsertEntity(entities, personEntity(previousOwnerKey, ownership.previousOwner, undefined, evidenceId));

@@ -1,7 +1,19 @@
-// types — split out of the former monolithic meeting-store.ts
+// types — record shapes returned by the store, plus the raw `Row` type the mappers in rows.ts consume.
 import { type MeetingNote } from "@meetings";
 import { type GraphEntityType } from "@core";
 
+/**
+ * A meeting as tracked by the workflow. Stored statuses:
+ * - `pending_approval`: held for an admin to approve (rows written as
+ *   `dry-run` by older versions are migrated to this);
+ * - `publishing`: a publish started and has not finished. The Notion and
+ *   Discord fields hold the steps already done, so a retry resumes there;
+ * - `processed`: published to Notion and Discord;
+ * - `failed`: its ingestion job ran out of attempts while publishing; `error`
+ *   holds the last error, and a retry (re-send or approve) still resumes.
+ *
+ * `dry-run` marks the unsaved record returned by a preview; it is never stored.
+ */
 export interface MeetingRecord {
   id: string;
   source: MeetingNote["source"];
@@ -12,7 +24,7 @@ export interface MeetingRecord {
   notionPageId?: string;
   notionUrl?: string;
   discordMessageUrl?: string;
-  status: "processed" | "dry-run" | "failed";
+  status: "pending_approval" | "publishing" | "processed" | "failed" | "dry-run";
   error?: string;
 }
 
@@ -97,6 +109,7 @@ export interface BrainSearchResult {
   createdAt: string;
 }
 
+/** Paging input; each list function clamps it with its own default and maximum. */
 export interface PageOptions {
   limit?: number;
   offset?: number;
@@ -106,6 +119,7 @@ export interface BrainSearchOptions extends PageOptions {
   types?: Array<BrainSearchResult["type"]>;
 }
 
+/** A meeting held for review; see approvals.ts for the status lifecycle (`rejected` and `posted` are terminal). */
 export interface ApprovalRecord {
   id: string;
   meetingId: string;
@@ -134,6 +148,7 @@ export interface ApprovalSummaryRecord {
   updatedAt: string;
 }
 
+/** Approval input; the summary fields are derived from the JSON blobs when omitted. */
 export type ApprovalWriteInput = Omit<ApprovalRecord, "createdAt" | "updatedAt"> &
   Partial<Pick<ApprovalSummaryRecord, "routeProject" | "routeReason" | "publishMode" | "decisionCount" | "actionItemCount">>;
 
@@ -150,6 +165,7 @@ export interface MeetingGraphBackfillRecord {
   };
 }
 
+/** A row of `ingestion_jobs`; `payloadJson` holds the Granola payload and its workflow options. */
 export interface IngestionJobRecord {
   id: string;
   type: "granola.ingest";
@@ -196,6 +212,10 @@ export interface GraphSyncQueueStats {
   failed: number;
 }
 
+/**
+ * A row of `graph_change_sets`; `applyStatus` mirrors the owning graph-sync job.
+ * `unverified` means the bridge accepted a replay write but the readback diff did not pass.
+ */
 export interface GraphChangeSetRecord {
   id: string;
   meetingId: string;
@@ -205,13 +225,14 @@ export interface GraphChangeSetRecord {
   validationErrorsJson: string;
   validationWarningsJson: string;
   changeSetJson: string;
-  applyStatus: "queued" | "applied" | "failed";
+  applyStatus: "queued" | "applied" | "unverified" | "failed";
   appliedAt?: string;
   lastError?: string;
   createdAt: string;
   updatedAt: string;
 }
 
+/** Materialized ontology read model rows; the `*Json` fields are raw JSON columns. */
 export interface OntologyEntityRow {
   stableKey: string;
   type: GraphEntityType;
@@ -261,6 +282,7 @@ export interface OntologyBackfillResult {
   changedSince?: string;
 }
 
+/** A raw node:sqlite result row, keyed by column name. */
 export interface Row {
   [key: string]: unknown;
 }

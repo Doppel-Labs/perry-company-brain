@@ -2,7 +2,7 @@
 /**
  * Canonical bootstrap for the Company Brain monorepo. Creates local env/config
  * files from the checked-in examples so `pnpm dev` / `pnpm build` just work.
- * Idempotent — never overwrites an existing file. Run via `pnpm setup`.
+ * Idempotent — never overwrites an existing file. Run via `pnpm bootstrap`.
  */
 import { copyFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";

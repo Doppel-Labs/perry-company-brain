@@ -1,9 +1,20 @@
-// search — split out of the former monolithic meeting-store.ts
-import { join } from "node:path";
+// search — full-text search over meetings, decisions, and action items (the brain_fts FTS5 index).
+//
+// User input is reduced to letter/number tokens before it reaches MATCH, so
+// FTS5 query syntax cannot be injected. Each token becomes a prefix term.
+// Only rows already flushed from fts_queue are searchable.
 import { DatabaseSync } from "node:sqlite";
 import { type BrainSearchOptions, type BrainSearchResult, type Row } from "./types";
-import { optionalString, statement, withDb } from "./db";
+import { statement, withDb } from "./database";
+import { optionalString } from "./values";
 
+/**
+ * Ranked (bm25) search, `limit` clamped to 1..100. Tries progressively looser
+ * queries until one returns rows: all terms; all terms minus single digits;
+ * then any term (OR). `options.types` filters by result type; unknown types
+ * are ignored. Returns [] for a query with no searchable tokens. `snippet`
+ * is the full indexed body, not an excerpt.
+ */
 export function searchBrain(query: string, limit = 20, options: BrainSearchOptions = {}): BrainSearchResult[] {
   let ftsQuery = toFtsQuery(query);
   if (!ftsQuery) return [];

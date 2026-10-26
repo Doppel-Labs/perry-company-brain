@@ -1,3 +1,8 @@
+// tools — the agent-facing "brain tools": stable, JSON-shaped reads of the ontology.
+//
+// Each tool returns a `tool` name, the input as interpreted (trimmed, clamped),
+// and compact refs instead of full ontology records, so an agent gets bounded,
+// predictable payloads. Served over HTTP at /api/brain/tools/*.
 import {
   getOntologyIndex,
   queryArtifacts,
@@ -16,7 +21,7 @@ import {
   type OntologyEntityRecord,
   type OntologyIndex,
   type OntologyQueryOptions,
-} from "./ontology-queries";
+} from "./ontology";
 import { companyOntologyEntityTypes, type GraphEvidenceLink, type GraphRelationAssertion } from "@core";
 
 export interface BrainToolProjectStateInput extends OntologyQueryOptions {
@@ -31,6 +36,7 @@ export interface BrainToolEvidenceInput {
   stableKey: string;
 }
 
+/** A compact entity: identity plus evidence and relation counts rather than the records themselves. */
 export interface BrainToolEntityRef {
   stableKey: string;
   type: CompanyOntologyEntityType;
@@ -60,6 +66,11 @@ export interface BrainToolRelationRef {
   validFrom?: string;
 }
 
+/**
+ * `company_brain.project_state`: an ontology summary plus one section per type.
+ * Types default to goal, risk, blocker, open_question, and capability (unknown
+ * types are dropped); `limit` defaults to 10 per section, max 50.
+ */
 export function getBrainToolProjectState(input: BrainToolProjectStateInput = {}): {
   tool: "company_brain.project_state";
   generatedAt: string;
@@ -83,6 +94,7 @@ export function getBrainToolProjectState(input: BrainToolProjectStateInput = {})
   };
 }
 
+/** `company_brain.changed_since`: entities changed since `since` (default 50, max 200). */
 export function getBrainToolChangedSince(input: BrainToolChangedSinceInput): {
   tool: "company_brain.changed_since";
   generatedAt: string;
@@ -105,6 +117,7 @@ export function getBrainToolChangedSince(input: BrainToolChangedSinceInput): {
   };
 }
 
+/** `company_brain.evidence`: an entity, its relations, and its evidence (excerpts cut to 600 characters). */
 export function getBrainToolEvidence(input: BrainToolEvidenceInput): {
   tool: "company_brain.evidence";
   generatedAt: string;

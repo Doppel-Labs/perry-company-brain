@@ -1,3 +1,8 @@
+// index.ts — process entry point: Discord bot, scheduled jobs, and the admin server.
+//
+// Any startup failure (including missing required config) is logged and exits
+// the process with code 1. Set PERRY_ADMIN_SERVER=false to run without the
+// admin HTTP server.
 import { registerSlashCommands, startDiscord } from "@discord";
 import { scheduleJobs } from "@discord";
 import { startAdminServer } from "@server";

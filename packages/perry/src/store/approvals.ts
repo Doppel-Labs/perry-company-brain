@@ -1,60 +1,85 @@
-// approvals — split out of the former monolithic meeting-store.ts
+// approvals — pending-approval records for meetings that are not auto-published.
+//
+// An approval stores everything needed to publish later: the raw Granola
+// payload, the announcement, extracted knowledge, and the resolved route.
+// Route project/reason/publish mode and the decision/action counts are also
+// copied into their own columns so list views can read summaries without
+// parsing the JSON blobs. Status: pending → approved → posted, or rejected
+// (transitions are driven by src/ingestion/workflow.ts). `rejected` and
+// `posted` are terminal: a re-sent meeting never reopens them.
 import { DatabaseSync } from "node:sqlite";
 import { type ApprovalRecord, type ApprovalSummaryRecord, type ApprovalWriteInput, type PageOptions, type Row } from "./types";
-import { insertAudit, normalizePage, parseJsonRecord, statement, withBrainTransaction, withDb } from "./db";
+import { insertAudit, statement, withBrainTransaction, withDb } from "./database";
+import { normalizePage, parseJsonRecord } from "./values";
 import { approvalFromRow, approvalSummaryFromRow } from "./rows";
 
 const approvalSummaryColumns = `id, meeting_id, title, announcement, route_project, route_reason, publish_mode,
   decision_count, action_item_count, status, created_at, updated_at`;
 
+/**
+ * Inserts the approval with `record.id`, or refreshes an existing one (a
+ * re-ingested meeting) with the new payload and status. A `rejected` or
+ * `posted` approval is terminal and left untouched, so a Granola re-send can
+ * never reopen it. Missing summary fields are derived from
+ * `routeJson`/`knowledgeJson`. Returns the stored row (with its original
+ * `createdAt`). Writes an `approval.created` or `approval.refreshed` audit row
+ * when it inserts or changes one.
+ */
 export function createApproval(record: ApprovalWriteInput): ApprovalRecord {
   const now = new Date().toISOString();
-  const fullRecord: ApprovalRecord = { ...record, createdAt: now, updatedAt: now };
   const summary = summarizeApproval(record);
-  return withDb((db) => {
-    statement(
-      db,
-      `INSERT INTO approvals (
-        id, meeting_id, title, payload_json, announcement, knowledge_json,
-        route_json, status, created_at, updated_at, route_project, route_reason,
-        publish_mode, decision_count, action_item_count
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        title = excluded.title,
-        payload_json = excluded.payload_json,
-        announcement = excluded.announcement,
-        knowledge_json = excluded.knowledge_json,
-        route_json = excluded.route_json,
-        status = excluded.status,
-        updated_at = excluded.updated_at,
-        route_project = excluded.route_project,
-        route_reason = excluded.route_reason,
-        publish_mode = excluded.publish_mode,
-        decision_count = excluded.decision_count,
-        action_item_count = excluded.action_item_count`
-    ).run(
-      fullRecord.id,
-      fullRecord.meetingId,
-      fullRecord.title,
-      fullRecord.payloadJson,
-      fullRecord.announcement,
-      fullRecord.knowledgeJson,
-      fullRecord.routeJson,
-      fullRecord.status,
-      fullRecord.createdAt,
-      fullRecord.updatedAt,
-      summary.routeProject ?? null,
-      summary.routeReason ?? null,
-      summary.publishMode ?? null,
-      summary.decisionCount,
-      summary.actionItemCount
-    );
-    insertAudit(db, "approval.created", "approval", fullRecord.id, fullRecord);
-    return fullRecord;
-  });
+  return withDb((db) =>
+    withBrainTransaction(() => {
+      const existed = statement(db, "SELECT 1 FROM approvals WHERE id = ?").get(record.id) !== undefined;
+      const result = statement(
+        db,
+        `INSERT INTO approvals (
+          id, meeting_id, title, payload_json, announcement, knowledge_json,
+          route_json, status, created_at, updated_at, route_project, route_reason,
+          publish_mode, decision_count, action_item_count
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          title = excluded.title,
+          payload_json = excluded.payload_json,
+          announcement = excluded.announcement,
+          knowledge_json = excluded.knowledge_json,
+          route_json = excluded.route_json,
+          status = excluded.status,
+          updated_at = excluded.updated_at,
+          route_project = excluded.route_project,
+          route_reason = excluded.route_reason,
+          publish_mode = excluded.publish_mode,
+          decision_count = excluded.decision_count,
+          action_item_count = excluded.action_item_count
+        WHERE approvals.status NOT IN ('rejected', 'posted')`
+      ).run(
+        record.id,
+        record.meetingId,
+        record.title,
+        record.payloadJson,
+        record.announcement,
+        record.knowledgeJson,
+        record.routeJson,
+        record.status,
+        now,
+        now,
+        summary.routeProject ?? null,
+        summary.routeReason ?? null,
+        summary.publishMode ?? null,
+        summary.decisionCount,
+        summary.actionItemCount
+      );
+      const stored = approvalFromRow(statement(db, "SELECT * FROM approvals WHERE id = ?").get(record.id) as Row);
+      if (Number(result.changes) > 0) {
+        insertAudit(db, existed ? "approval.refreshed" : "approval.created", "approval", record.id, stored);
+      }
+      return stored;
+    })
+  );
 }
 
+/** Plain INSERT for bulk backfills: throws if the id already exists. Writes an `approval.backfilled` audit row. */
 export function insertBackfillApproval(record: ApprovalWriteInput): ApprovalRecord {
   const now = new Date().toISOString();
   const fullRecord: ApprovalRecord = { ...record, createdAt: now, updatedAt: now };
@@ -64,6 +89,7 @@ export function insertBackfillApproval(record: ApprovalWriteInput): ApprovalReco
   });
 }
 
+/** Backfill inserts in one transaction (all or nothing); returns the number inserted. */
 export function insertBackfillApprovalBatch(records: ApprovalWriteInput[]): number {
   if (records.length === 0) return 0;
   return withDb((db) =>
@@ -110,6 +136,7 @@ function insertBackfillApprovalInDb(
   insertAudit(db, "approval.backfilled", "approval", fullRecord.id, fullRecord);
 }
 
+/** Full approval records, newest first, optionally filtered by status (default 100, max 1000). */
 export function listApprovals(status?: ApprovalRecord["status"], options: PageOptions = {}): ApprovalRecord[] {
   const { limit, offset } = normalizePage(options, 100, 1000);
   return withDb((db) => {
@@ -124,6 +151,7 @@ export function listApprovals(status?: ApprovalRecord["status"], options: PageOp
   });
 }
 
+/** Like listApprovals, but reads only the summary columns, skipping the large JSON blobs. */
 export function listApprovalSummaries(
   status?: ApprovalRecord["status"],
   options: PageOptions = {}
@@ -159,14 +187,24 @@ export function getApproval(id: string): ApprovalRecord | undefined {
   });
 }
 
+/**
+ * Sets the status (no transition check; callers enforce the lifecycle) and
+ * writes an `approval.status_changed` audit row with the previous status.
+ * Returns the record, or undefined if `id` does not exist. Nothing is written
+ * when the approval is missing or already has `status`.
+ */
 export function updateApprovalStatus(id: string, status: ApprovalRecord["status"]): ApprovalRecord | undefined {
-  return withDb((db) => {
-    const now = new Date().toISOString();
-    statement(db, "UPDATE approvals SET status = ?, updated_at = ? WHERE id = ?").run(status, now, id);
-    insertAudit(db, "approval.status_changed", "approval", id, { status });
-    const row = statement(db, "SELECT * FROM approvals WHERE id = ?").get(id);
-    return row ? approvalFromRow(row as Row) : undefined;
-  });
+  return withDb((db) =>
+    withBrainTransaction(() => {
+      const before = statement(db, "SELECT * FROM approvals WHERE id = ?").get(id) as Row | undefined;
+      if (!before) return undefined;
+      if (String(before.status) === status) return approvalFromRow(before);
+      const now = new Date().toISOString();
+      statement(db, "UPDATE approvals SET status = ?, updated_at = ? WHERE id = ?").run(status, now, id);
+      insertAudit(db, "approval.status_changed", "approval", id, { from: String(before.status), status });
+      return approvalFromRow(statement(db, "SELECT * FROM approvals WHERE id = ?").get(id) as Row);
+    })
+  );
 }
 
 function summarizeApproval(record: ApprovalWriteInput): Pick<

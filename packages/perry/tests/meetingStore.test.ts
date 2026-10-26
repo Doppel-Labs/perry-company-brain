@@ -16,6 +16,10 @@ import {
   closeBrainStore,
   createApproval,
   listApprovalSummaries,
+  getMeetingRecord,
+  meetingIdForNote,
+  listOpenActionItemsByOwners,
+  withDb,
 } from "@store";
 import type { MeetingNote } from "@meetings";
 
@@ -138,6 +142,158 @@ test("lists approval summaries without requiring full JSON payload parsing", () 
     assert.equal(summary.decisionCount, 1);
     assert.equal(summary.actionItemCount, 2);
     assert.equal("payloadJson" in summary, false);
+  } finally {
+    closeBrainStore(process.env.PERRY_DB_PATH);
+    if (previousPath === undefined) {
+      delete process.env.PERRY_DB_PATH;
+    } else {
+      process.env.PERRY_DB_PATH = previousPath;
+    }
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("replaceMeetingKnowledge is atomic: a failed replace keeps the old knowledge", () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "perry-store-knowledge-"));
+  const previousPath = process.env.PERRY_DB_PATH;
+  process.env.PERRY_DB_PATH = join(tempDir, "perry.sqlite");
+
+  try {
+    const note: MeetingNote = {
+      source: "granola",
+      sourceId: "atomic-knowledge",
+      title: "Atomic Knowledge",
+      attendees: [],
+      summaryMarkdown: "",
+    };
+    const record = upsertMeetingRecord(meetingRecordFromNote(note, "processed"));
+    replaceMeetingKnowledge(record.id, {
+      decisions: [{ text: "Original decision." }],
+      actionItems: [{ text: "Original action.", owner: "Ada" }],
+    });
+    // Fails the replace after its deletes and the new decision have run.
+    withDb((db) =>
+      db.exec(`CREATE TRIGGER explode_action BEFORE INSERT ON action_items WHEN NEW.text = 'Explode'
+        BEGIN SELECT RAISE(ABORT, 'action insert failed'); END;`)
+    );
+
+    assert.throws(
+      () =>
+        replaceMeetingKnowledge(record.id, {
+          decisions: [{ text: "Replacement decision." }],
+          actionItems: [{ text: "Explode" }],
+        }),
+      /action insert failed/u
+    );
+
+    assert.deepEqual(
+      listDecisions().map((decision) => decision.text),
+      ["Original decision."]
+    );
+    assert.deepEqual(
+      listActionItems().map((action) => action.text),
+      ["Original action."]
+    );
+  } finally {
+    closeBrainStore(process.env.PERRY_DB_PATH);
+    if (previousPath === undefined) {
+      delete process.env.PERRY_DB_PATH;
+    } else {
+      process.env.PERRY_DB_PATH = previousPath;
+    }
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("notes without a sourceId get a stable content-derived id and dedupe", () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "perry-store-content-id-"));
+  const previousPath = process.env.PERRY_DB_PATH;
+  process.env.PERRY_DB_PATH = join(tempDir, "perry.sqlite");
+
+  try {
+    const note: MeetingNote = {
+      source: "granola",
+      title: "Untracked Sync",
+      creatorEmail: "ada@example.com",
+      startedAt: "2026-10-01T10:00:00.000Z",
+      attendees: [],
+      summaryMarkdown: "Decision: keep it.",
+    };
+    const first = meetingRecordFromNote(note, "processed");
+    const again = meetingRecordFromNote({ ...note, summaryMarkdown: "Decision: keep it, edited." }, "processed");
+    assert.match(first.id, /^granola:content:[0-9a-f]{24}$/u);
+    assert.equal(again.id, first.id, "a dated note keeps its id when its summary is edited");
+    assert.notEqual(meetingIdForNote({ ...note, startedAt: "2026-10-02T10:00:00.000Z" }), first.id);
+    assert.notEqual(meetingIdForNote({ ...note, creatorEmail: "bo@example.com" }), first.id);
+
+    // Undated notes that share only a title stay separate.
+    const undated = { ...note, startedAt: undefined };
+    assert.notEqual(meetingIdForNote(undated), meetingIdForNote({ ...undated, summaryMarkdown: "Another standup." }));
+
+    upsertMeetingRecord(first);
+    assert.equal(findMeetingRecord(note)?.id, first.id);
+  } finally {
+    closeBrainStore(process.env.PERRY_DB_PATH);
+    if (previousPath === undefined) {
+      delete process.env.PERRY_DB_PATH;
+    } else {
+      process.env.PERRY_DB_PATH = previousPath;
+    }
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("meetings stored as dry-run by older versions read back as pending_approval", () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "perry-store-dry-run-migration-"));
+  const previousPath = process.env.PERRY_DB_PATH;
+  process.env.PERRY_DB_PATH = join(tempDir, "perry.sqlite");
+
+  try {
+    withDb((db) =>
+      db
+        .prepare(
+          `INSERT INTO meetings (id, source, source_id, title, created_at, updated_at, status)
+           VALUES ('granola:legacy', 'granola', 'legacy', 'Legacy Hold', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', 'dry-run')`
+        )
+        .run()
+    );
+    closeBrainStore(process.env.PERRY_DB_PATH);
+
+    assert.equal(getMeetingRecord("granola:legacy")?.status, "pending_approval");
+  } finally {
+    closeBrainStore(process.env.PERRY_DB_PATH);
+    if (previousPath === undefined) {
+      delete process.env.PERRY_DB_PATH;
+    } else {
+      process.env.PERRY_DB_PATH = previousPath;
+    }
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("listOpenActionItemsByOwners matches owners case-insensitively and skips closed items", () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "perry-store-owner-actions-"));
+  const previousPath = process.env.PERRY_DB_PATH;
+  process.env.PERRY_DB_PATH = join(tempDir, "perry.sqlite");
+
+  try {
+    const note: MeetingNote = { source: "granola", sourceId: "owners", title: "Owners", attendees: [], summaryMarkdown: "" };
+    const record = upsertMeetingRecord(meetingRecordFromNote(note, "processed"));
+    replaceMeetingKnowledge(record.id, {
+      decisions: [],
+      actionItems: [
+        { text: "Ada's task.", owner: " Ada " },
+        { text: "Bo's task.", owner: "bo" },
+        { text: "Cy's task.", owner: "Cy" },
+      ],
+    });
+    withDb((db) => db.prepare("UPDATE action_items SET status = 'done' WHERE text = ?").run("Bo's task."));
+
+    assert.deepEqual(
+      listOpenActionItemsByOwners(["ada", "BO", " "]).map((action) => action.text),
+      ["Ada's task."]
+    );
+    assert.deepEqual(listOpenActionItemsByOwners([]), []);
   } finally {
     closeBrainStore(process.env.PERRY_DB_PATH);
     if (previousPath === undefined) {

@@ -3,4 +3,6 @@ export * from "./knowledge";
 export * from "./semantic";
 export * from "./extract";
 export * from "./lm-studio";
+export * from "./pipeline";
 export * from "./together";
+export * from "./types";

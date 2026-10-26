@@ -11,7 +11,7 @@ const {
   queryOpenQuestions,
   queryRisks,
   summarizeOntology,
-} = require("../dist/brain/ontology-queries.js");
+} = require("../dist/brain/ontology/index.js");
 
 const args = parseArgs(process.argv.slice(2));
 const reportPath = args.report || "";

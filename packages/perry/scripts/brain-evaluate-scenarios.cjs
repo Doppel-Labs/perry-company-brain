@@ -11,7 +11,7 @@ const {
 } = require("../dist/store/index.js");
 const { drainGraphSyncJobs } = require("../dist/graph/queue.js");
 const { replayGraphChangeSet } = require("../dist/graph/change-set-replay.js");
-const { searchGraphMemory } = require("../dist/graph/memory.js");
+const { searchGraphMemory } = require("../dist/graph/memory/index.js");
 const { processGranolaZapierPayload } = require("../dist/ingestion/workflow.js");
 const { getCompanyBrainHealth } = require("../dist/brain/health.js");
 const { getCompanyBrainAnalytics } = require("../dist/brain/analytics.js");

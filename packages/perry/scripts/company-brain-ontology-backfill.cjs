@@ -10,7 +10,7 @@ const {
   getMeetingStorePath,
   rebuildOntologyMaterializedIndex,
 } = require("../dist/store/index.js");
-const { summarizeOntology } = require("../dist/brain/ontology-queries.js");
+const { summarizeOntology } = require("../dist/brain/ontology/index.js");
 
 process.env.PERRY_DB_PATH ||= getMeetingStorePath();
 

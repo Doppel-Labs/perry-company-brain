@@ -1,3 +1,4 @@
+// meetings — writes a processed meeting note as a page in the Notion meeting-notes data source.
 import { Client } from "@notionhq/client";
 import { loadAppSettings } from "@core";
 import type { MeetingNote } from "@meetings";
@@ -8,6 +9,14 @@ export interface CreatedMeetingPage {
   url?: string;
 }
 
+/**
+ * Creates a meeting-notes page: properties named by meetingNotesSchema,
+ * and a body of Summary, Private Notes, and Transcript sections (transcript cut
+ * to 15,000 characters, paragraphs to 1,900, at most 100 blocks). The data
+ * source is `options.dataSourceId` (a routing rule's), else the settings value,
+ * which defaults to NOTION_MEETING_NOTES_DATA_SOURCE_ID. Returns undefined, writing nothing, when NOTION_TOKEN or the
+ * data source is missing. PERRY_NOTION_DRY_RUN=true returns a fake page instead.
+ */
 export async function createMeetingNotePage(
   note: MeetingNote,
   options: { dataSourceId?: string } = {}
@@ -21,10 +30,7 @@ export async function createMeetingNotePage(
 
   const settings = loadAppSettings();
   const notionToken = process.env.NOTION_TOKEN;
-  const dataSourceId =
-    options.dataSourceId ??
-    process.env.NOTION_MEETING_NOTES_DATA_SOURCE_ID ??
-    settings.notion.meetingNotesDataSourceId;
+  const dataSourceId = options.dataSourceId ?? settings.notion.meetingNotesDataSourceId;
   if (!notionToken || !dataSourceId) return undefined;
 
   const notion = new Client({ auth: notionToken, notionVersion: "2025-09-03" } as any);
@@ -112,6 +118,7 @@ function heading(content: string): any {
   };
 }
 
+/** One plain-text paragraph block per blank-line-separated chunk; no Markdown formatting is converted. */
 function markdownParagraphs(markdown: string): any[] {
   return markdown
     .split(/\n{2,}/u)

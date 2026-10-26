@@ -1,34 +1,62 @@
+// job-queue — the shared durable SQLite job-queue engine behind the ingestion and graph-sync queues.
+//
+// Both queues are the same machine; only the table, the row shape, the audit
+// names, and a couple of side-effects differ. Encoding that machine once (here)
+// means the subtle parts, the claim transaction, the lease, and the retry
+// backoff, have a single source of truth. Enqueueing is NOT part of the engine:
+// each queue module writes its own rows (ingestion dedupes on an idempotency
+// key, graph-sync upserts by job id and resets the attempt count).
+//
+// Table contract — every queue table has these columns:
+//   id, status ('queued'|'processing'|'completed'|'failed'), attempts,
+//   max_attempts, not_before, locked_at, last_error, result_json,
+//   created_at, updated_at
+//
+// Lifecycle:
+//   (enqueue) ─► queued ──claim()──► processing ──complete()──► completed
+//                  ▲                     │
+//                  ├── fail(), attempts < max_attempts: not_before = now + backoff
+//                  └── lease expired, attempts < max_attempts: not_before = now
+//                                        ├── fail(), attempts >= max_attempts ──► failed
+//                                        └── lease expired, attempts >= max_attempts ──► failed
+//
+// Claiming is the only step that must be atomic: inside one BEGIN IMMEDIATE
+// transaction, expired leases are reclaimed (see below), then due rows
+// (`queued` and `not_before <= now`, oldest `created_at` first) are selected and
+// flipped to `processing` with `locked_at = now`, so two workers cannot claim
+// the same job. complete()/fail() update one row by id and then run the
+// per-queue hook and write the audit row as separate statements; they are
+// atomic only when the caller has a transaction open.
+//
+// Backoff: fail() increments `attempts`. Below `max_attempts` the job is
+// re-queued with `not_before = now + min(capMs, 1000 · 2^min(attempts, maxExp))`;
+// at the limit it becomes `failed` (terminal; nothing re-queues it). Each queue
+// picks its own cap: 60 s for ingestion, 5 min for graph-sync.
+//
+// Lease: `locked_at` is the claim time, and a claim holds its job for
+// PERRY_JOB_LEASE_MS (default 10 minutes). A job still `processing` after that
+// is presumed abandoned by a crashed or stalled worker. The next claim counts
+// the lost run as a failed attempt: below `max_attempts` the job is re-queued,
+// due at once, and can be claimed by that same call; at the limit it is retired
+// to `failed` (running the `onFail` hook). A worker that was only slow may
+// still finish after its job was reclaimed, so a job's work must be safe to
+// repeat; the ingestion workflow resumes a half-published meeting instead of
+// publishing it twice.
 import type { DatabaseSync } from "node:sqlite";
 import { type PageOptions, type Row } from "./types";
-import { insertAudit, normalizePage, statement, withBrainTransaction, withDb } from "./db";
+import { insertAudit, statement, withBrainTransaction, withDb } from "./database";
+import { normalizePage } from "./values";
 
-/**
- * A durable, at-least-once SQLite job queue — the shared engine behind both the
- * Granola **ingestion** queue and the Graphiti **graph-sync** queue.
- *
- * Both queues are the same machine; only the table, the row shape, the audit
- * names, and a couple of side-effects differ. Encoding that machine once (here)
- * instead of twice means the subtle parts — the claim transaction and the retry
- * backoff — have a single, documented source of truth and can't drift apart.
- *
- * ## The contract every queue table satisfies
- * `id, status('queued'|'processing'|'completed'|'failed'), attempts, max_attempts,
- *  not_before, locked_at, last_error, result_json, created_at, updated_at`.
- *
- * ## Claiming (the only part that must be atomic)
- * A worker `claim()`s a batch by selecting `queued` rows whose `not_before` has
- * passed and flipping them to `processing` — all inside one transaction so two
- * workers can never grab the same job. `complete()`/`fail()` don't need the
- * transaction: they target a single row by id.
- *
- * ## Failure & backoff
- * On `fail()` we bump `attempts`; if it reaches `max_attempts` the job is dead
- * (`failed`), otherwise it's re-`queued` with an exponential `not_before`:
- * `delay = min(capMs, 1000 · 2^min(attempts, maxExp))`. The cap bounds the wait
- * for a permanently-flaky job; `maxExp` bounds the exponent so the math never
- * overflows. (Ingestion is impatient — 60 s cap; graph-sync tolerates longer
- * outages — 5 min — hence the per-queue `backoff`.)
- */
+const DEFAULT_JOB_LEASE_MS = 10 * 60_000;
+
+/** How long a claim holds its job: PERRY_JOB_LEASE_MS when that is a positive number, else 10 minutes. */
+export function jobLeaseMs(): number {
+  const raw = process.env.PERRY_JOB_LEASE_MS?.trim();
+  const parsed = raw ? Number(raw) : Number.NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_JOB_LEASE_MS;
+}
+
+/** Job counts per status; a status with no rows reports 0. */
 export interface JobQueueStats {
   queued: number;
   processing: number;
@@ -36,36 +64,43 @@ export interface JobQueueStats {
   failed: number;
 }
 
+/** Per-queue configuration; `table` and `claim.where` are interpolated into SQL, so they must be trusted constants. */
 export interface JobQueueConfig<T> {
   /** Job table; must have the standard columns described above. */
   table: string;
   /** Maps a raw SQLite row to the typed job record. */
   mapRow: (row: Row) => T;
-  /** Audit naming: event is `${prefix}.completed|failed|retry_queued`, tagged with `entity`. */
+  /** Audit naming: event is `${prefix}.completed|failed|retry_queued|lease_expired`, tagged with `entity`. */
   events: { prefix: string; entity: string };
   /** Retry backoff: `delay = min(capMs, 1000 · 2^min(attempts, maxExp))`. */
   backoff: { capMs: number; maxExp: number };
-  /** Extra leading `WHERE` clause for claims (e.g. `"type = ?"`) and its bound params. */
+  /** Extra leading `WHERE` clause for claims and lease reclaims (e.g. `"type = ?"`) and its bound params. */
   claim?: { where: string; params: string[] };
   /** Side-effect on success, threaded through the same connection (e.g. mark a change-set applied). */
   onComplete?: (db: DatabaseSync, id: string, now: string) => void;
-  /** Side-effect on failure/retry, threaded through the same connection. */
+  /** Side-effect on failure, retry, or expired lease, threaded through the same connection. */
   onFail?: (db: DatabaseSync, id: string, message: string, status: "failed" | "queued") => void;
 }
 
+/** The operations a queue module re-exports under its own names (e.g. `claimIngestionJobs`). */
 export interface JobQueue<T> {
-  /** Atomically claim up to `limit` due jobs (queued → processing). */
+  /**
+   * Atomically reclaim expired leases, then claim up to `limit` (default 10,
+   * max 1000) due jobs, oldest first (queued → processing). `limit <= 0`
+   * does nothing.
+   */
   claim(limit?: number): T[];
-  /** Mark a job completed; returns the updated record (or undefined if gone). */
+  /** Mark a job completed, storing `result` as JSON; returns the updated record (or undefined if gone). Does not check the current status. */
   complete(id: string, result: unknown): T | undefined;
-  /** Record a failure: retire after `max_attempts`, else re-queue with backoff. */
+  /** Record a failure (stores the error message): retire after `max_attempts`, else re-queue with backoff. Undefined if the job is gone. */
   fail(id: string, error: unknown): T | undefined;
   /** Count of jobs by status. */
   stats(): JobQueueStats;
-  /** Most-recent jobs first, paginated. */
+  /** Most-recent jobs first, paginated (default 50, max 200). */
   list(options?: PageOptions): T[];
 }
 
+/** Builds the queue operations for one job table. Pure setup: nothing touches the database until an operation runs. */
 export function createJobQueue<T>(config: JobQueueConfig<T>): JobQueue<T> {
   const { table, mapRow, events, backoff } = config;
   const claimWhere = config.claim ? `${config.claim.where} AND ` : "";
@@ -78,6 +113,7 @@ export function createJobQueue<T>(config: JobQueueConfig<T>): JobQueue<T> {
     return withDb((db) =>
       withBrainTransaction(() => {
         const now = new Date().toISOString();
+        reclaimExpiredLeases(db, now);
         const rows = statement(
           db,
           `SELECT * FROM ${table} WHERE ${claimWhere}status = ? AND not_before <= ? ORDER BY created_at ASC LIMIT ?`
@@ -99,6 +135,48 @@ export function createJobQueue<T>(config: JobQueueConfig<T>): JobQueue<T> {
     );
   }
 
+  // Runs inside claim()'s transaction. A `processing` row with no locked_at has
+  // no lease holder either, so it counts as expired.
+  function reclaimExpiredLeases(db: DatabaseSync, now: string): void {
+    const leaseMs = jobLeaseMs();
+    const cutoff = new Date(Date.parse(now) - leaseMs).toISOString();
+    const rows = statement(
+      db,
+      `SELECT id, attempts, max_attempts FROM ${table}
+       WHERE ${claimWhere}status = ? AND (locked_at IS NULL OR locked_at <= ?)`
+    ).all(...claimParams, "processing", cutoff) as Row[];
+    for (const row of rows) {
+      const message = `Lease expired: job was still processing after ${leaseMs} ms (worker crashed or stalled)`;
+      recordFailure(db, row, message, now, now, "lease_expired");
+    }
+  }
+
+  // Shared by fail() and lease expiry: counts one attempt, then retires the job
+  // at max_attempts or re-queues it, due at `retryAt`.
+  function recordFailure(
+    db: DatabaseSync,
+    row: Row,
+    message: string,
+    now: string,
+    retryAt: string,
+    retryEvent: "retry_queued" | "lease_expired"
+  ): void {
+    const id = String(row.id);
+    const attempts = Number(row.attempts) + 1;
+    const finalFailure = attempts >= Number(row.max_attempts);
+    const status: "failed" | "queued" = finalFailure ? "failed" : "queued";
+    // A retired job keeps not_before = now; `retryAt` only matters for a re-queue.
+    statement(
+      db,
+      `UPDATE ${table} SET status = ?, attempts = ?, locked_at = NULL, last_error = ?, not_before = ?, updated_at = ? WHERE id = ?`
+    ).run(status, attempts, message, finalFailure ? now : retryAt, now, id);
+    config.onFail?.(db, id, message, status);
+    insertAudit(db, finalFailure ? `${events.prefix}.failed` : `${events.prefix}.${retryEvent}`, events.entity, id, {
+      attempts,
+      error: message,
+    });
+  }
+
   function complete(id: string, result: unknown): T | undefined {
     return withDb((db) => {
       const now = new Date().toISOString();
@@ -116,24 +194,14 @@ export function createJobQueue<T>(config: JobQueueConfig<T>): JobQueue<T> {
   function fail(id: string, error: unknown): T | undefined {
     return withDb((db) => {
       const now = new Date().toISOString();
-      const row = statement(db, `SELECT attempts, max_attempts FROM ${table} WHERE id = ?`).get(id) as Row | undefined;
+      const row = statement(db, `SELECT id, attempts, max_attempts FROM ${table} WHERE id = ?`).get(id) as Row | undefined;
       if (!row) return undefined;
       const attempts = Number(row.attempts) + 1;
-      const finalFailure = attempts >= Number(row.max_attempts);
-      const status: "failed" | "queued" = finalFailure ? "failed" : "queued";
-      const notBefore = new Date(
+      const retryAt = new Date(
         Date.now() + Math.min(backoff.capMs, 1000 * 2 ** Math.min(attempts, backoff.maxExp))
       ).toISOString();
       const message = error instanceof Error ? error.message : String(error);
-      statement(
-        db,
-        `UPDATE ${table} SET status = ?, attempts = ?, locked_at = NULL, last_error = ?, not_before = ?, updated_at = ? WHERE id = ?`
-      ).run(status, attempts, message, finalFailure ? now : notBefore, now, id);
-      config.onFail?.(db, id, message, status);
-      insertAudit(db, finalFailure ? `${events.prefix}.failed` : `${events.prefix}.retry_queued`, events.entity, id, {
-        attempts,
-        error: message,
-      });
+      recordFailure(db, row, message, now, retryAt, "retry_queued");
       return mapRow(statement(db, byId).get(id) as Row);
     });
   }
