@@ -36,26 +36,24 @@ test("Granola webhook accepts only its own token", async () => {
   });
 });
 
-test("without a configured token only genuine local requests are trusted", async () => {
+test("an unconfigured token disables what it protects, even for local requests", async () => {
   await withEnv({}, async (baseUrl, port) => {
-    assert.equal((await fetch(`${baseUrl}/api/users`)).status, 200);
-    // DNS-rebinding page: loopback peer but a foreign Host header.
-    assert.equal(await rawStatus(port, "GET", "/api/users", { host: `evil.example:${port}` }), 401);
-    // A local reverse proxy forwarding remote traffic.
-    assert.equal((await fetch(`${baseUrl}/api/users`, { headers: { "x-forwarded-for": "203.0.113.9" } })).status, 401);
-    assert.equal(await rawStatus(port, "POST", "/api/granola/zapier", { host: "evil.example" }), 401);
+    const users = await fetch(`${baseUrl}/api/users`);
+    assert.equal(users.status, 503);
+    assert.match(((await users.json()) as { error: string }).error, /not configured/u);
+    assert.equal((await fetch(`${baseUrl}/api/users`, { headers: { authorization: "Bearer anything" } })).status, 503);
+    assert.equal(await rawStatus(port, "POST", "/api/granola/zapier", { "x-perry-webhook-token": "anything" }), 503);
+    assert.equal((await fetch(`${baseUrl}/api/ping`)).status, 200);
   });
 });
 
-test("rejects oversized and malformed JSON bodies", async () => {
+// Oversized bodies (413 + Connection: close) are covered with a raw HTTP client
+// in httpBody.test.ts; fetch reports the server's early close as a reset.
+test("rejects malformed JSON bodies with a 400", async () => {
   await withEnv({ ADMIN_API_TOKEN: "admin-secret" }, async (baseUrl) => {
     const headers = { authorization: "Bearer admin-secret", "content-type": "application/json" };
     const malformed = await fetch(`${baseUrl}/api/issues`, { method: "POST", headers, body: "{not json" });
     assert.equal(malformed.status, 400);
-    const huge = await fetch(`${baseUrl}/api/issues`, { method: "POST", headers, body: `"${"x".repeat(3 * 1024 * 1024)}"` }).catch(
-      () => undefined
-    );
-    if (huge) assert.equal(huge.status, 413);
   });
 });
 

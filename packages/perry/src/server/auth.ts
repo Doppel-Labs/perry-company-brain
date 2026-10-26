@@ -2,11 +2,14 @@
 //
 // Fail closed: routes declare an Access level (see router.ts) and default to
 // "admin". Only the liveness ping is public; the Granola webhook has its own
-// token. When a token is not configured, the request is only trusted if it is
-// a genuine local request —
-// loopback peer AND loopback Host header (the Host check defeats DNS-rebinding
-// pages in a local browser). A non-loopback bind refuses to start without
-// ADMIN_API_TOKEN, so an unconfigured server can never be reached remotely.
+// token, and the two tokens are never interchangeable. An unset token disables
+// what it protects: every admin route (or the webhook) answers 503 rather than
+// running without authentication, so a forgotten secret can never mean an open
+// API. `pnpm bootstrap` generates both tokens for local development.
+//
+// The server also binds to loopback by default, and a non-loopback bind
+// refuses to start without ADMIN_API_TOKEN, so a misconfigured deployment fails
+// at startup instead of serving 503s to the network.
 import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { httpError } from "./http/errors";
@@ -25,49 +28,43 @@ export function isLoopbackHost(host: string): boolean {
   return bare === "localhost" || bare === "::1" || bare === "::ffff:127.0.0.1" || /^127(?:\.\d{1,3}){3}$/u.test(bare);
 }
 
-/** Refuse to expose an unauthenticated admin API beyond this machine. */
+/** Refuse to expose the admin API beyond this machine without a token. */
 export function assertSafeBind(host: string): void {
   if (isLoopbackHost(host)) return;
-  if (!process.env.ADMIN_API_TOKEN) {
+  if (!process.env.ADMIN_API_TOKEN?.trim()) {
     throw new Error(
       `Refusing to bind the admin server to ${host} without ADMIN_API_TOKEN. ` +
         "Set ADMIN_API_TOKEN (and serve it over HTTPS) or keep ADMIN_HOST=127.0.0.1."
     );
   }
-  if (!process.env.GRANOLA_WEBHOOK_TOKEN) {
-    console.warn("GRANOLA_WEBHOOK_TOKEN is not set: /api/granola/zapier will reject all remote webhook calls.");
+  if (!process.env.GRANOLA_WEBHOOK_TOKEN?.trim()) {
+    console.warn("GRANOLA_WEBHOOK_TOKEN is not set: /api/granola/zapier answers 503 until it is.");
   }
 }
 
-/** Throws 401 unless the request satisfies `access`. */
+/** Throws 503 when the required token is not configured, 401 when the request does not carry it. */
 export function authorize(req: IncomingMessage, access: Access): void {
   if (access === "admin") requireAdmin(req);
   else if (access === "webhook") requireWebhook(req);
 }
 
 export function requireAdmin(req: IncomingMessage): void {
-  if (!hasValidToken(process.env.ADMIN_API_TOKEN, bearerToken(req), req)) {
-    throw httpError(401, "Unauthorized");
-  }
+  requireToken(process.env.ADMIN_API_TOKEN, bearerToken(req), "Admin authentication is not configured", "Unauthorized");
 }
 
 export function requireWebhook(req: IncomingMessage): void {
-  if (!hasValidToken(process.env.GRANOLA_WEBHOOK_TOKEN, header(req, "x-perry-webhook-token"), req)) {
-    throw httpError(401, "Unauthorized webhook");
-  }
+  requireToken(
+    process.env.GRANOLA_WEBHOOK_TOKEN,
+    header(req, "x-perry-webhook-token"),
+    "Webhook authentication is not configured",
+    "Unauthorized webhook"
+  );
 }
 
-/** A configured secret must match; an unconfigured one only admits trusted local requests. */
-function hasValidToken(expected: string | undefined, provided: string | undefined, req: IncomingMessage): boolean {
-  if (expected) return provided !== undefined && safeEqual(provided, expected);
-  return isTrustedLocalRequest(req);
-}
-
-/** Loopback peer, loopback Host header, and no X-Forwarded-For header (a proxied request). */
-export function isTrustedLocalRequest(req: IncomingMessage): boolean {
-  const peer = req.socket.remoteAddress ?? "";
-  const host = (req.headers.host ?? "").replace(/:\d+$/u, "");
-  return isLoopbackHost(peer) && isLoopbackHost(host) && !req.headers["x-forwarded-for"];
+function requireToken(expected: string | undefined, provided: string | undefined, unconfigured: string, unauthorized: string): void {
+  const secret = expected?.trim();
+  if (!secret) throw httpError(503, unconfigured);
+  if (provided === undefined || !safeEqual(provided, secret)) throw httpError(401, unauthorized);
 }
 
 function bearerToken(req: IncomingMessage): string | undefined {
@@ -81,6 +78,7 @@ function header(req: IncomingMessage, name: string): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
 
+/** Constant-time comparison; a length mismatch fails without comparing bytes. */
 function safeEqual(provided: string, expected: string): boolean {
   const a = Buffer.from(provided);
   const b = Buffer.from(expected);
