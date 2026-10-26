@@ -138,7 +138,7 @@ test("a job that fails mid-batch leaves no partial writes, and its failure is re
 
     const drained = await drainGranolaIngestionJobs(5);
 
-    assert.deepEqual(drained, { processed: 1, failed: 1 });
+    assert.deepEqual(drained, { processed: 1, failed: 1, leaseLost: 0 });
     assert.equal(getMeetingRecord("granola:atomic-bad"), undefined);
     assert.equal(listDecisions(10).some((decision) => decision.meetingId === "granola:atomic-bad"), false);
     assert.equal(listActionItems(10).some((action) => action.meetingId === "granola:atomic-bad"), false);

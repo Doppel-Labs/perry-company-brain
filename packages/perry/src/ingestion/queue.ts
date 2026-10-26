@@ -26,6 +26,8 @@ import {
   enqueueIngestionJob,
   failIngestionJob,
   getIngestionQueueStats,
+  releaseIngestionJob,
+  withIngestionJobLease,
   listIngestionJobs,
   meetingIdForNote,
   type IngestionJobRecord,
@@ -104,31 +106,32 @@ export async function processNextGranolaIngestionJob(): Promise<{
 }> {
   const job = claimNextIngestionJob();
   if (!job) return { processed: false };
-  return processClaimedGranolaIngestionJob(job);
+  const run = await processClaimedGranolaIngestionJob(job);
+  return run.owned ? { processed: true, job, result: run.result } : { processed: false, job };
 }
 
-async function processClaimedGranolaIngestionJob(job: IngestionJobRecord): Promise<{
-  processed: boolean;
-  job: IngestionJobRecord;
-  result: MeetingWorkflowResult;
-}> {
+/**
+ * Runs one claimed job while holding its lease (renewed at the start and
+ * throughout, see withLease), and records the outcome under that lease. If
+ * another worker reclaimed the job first, nothing runs and `owned` is false.
+ * Rethrows the workflow's error after recording it.
+ */
+async function processClaimedGranolaIngestionJob(
+  job: IngestionJobRecord
+): Promise<{ owned: true; result: MeetingWorkflowResult } | { owned: false }> {
   try {
-    const queued = JSON.parse(job.payloadJson) as QueuedGranolaPayload;
-    const result = await processGranolaZapierPayload(queued.payload, {
-      force: queued.options.force,
-      bypassApproval: queued.options.bypassApproval,
+    const run = await withIngestionJobLease(job, () => {
+      const queued = JSON.parse(job.payloadJson) as QueuedGranolaPayload;
+      return processGranolaZapierPayload(queued.payload, {
+        force: queued.options.force,
+        bypassApproval: queued.options.bypassApproval,
+      });
     });
-    completeIngestionJob(job.id, {
-      duplicate: result.duplicate,
-      dryRun: result.dryRun,
-      recordId: result.record.id,
-      approvalId: result.approval?.id,
-      notionPageId: result.notionPageId,
-      discordMessageUrl: result.discordMessageUrl,
-    });
-    return { processed: true, job, result };
+    if (!run.owned) return { owned: false };
+    completeIngestionJob(job.id, workflowResultSummary(run.value), job.leaseToken);
+    return { owned: true, result: run.value };
   } catch (error) {
-    failIngestionJob(job.id, error);
+    failIngestionJob(job.id, error, job.leaseToken);
     throw error;
   }
 }
@@ -137,14 +140,17 @@ async function processClaimedGranolaIngestionJob(job: IngestionJobRecord): Promi
  * Runs up to `limit` due jobs and returns how many succeeded and failed;
  * errors are counted, not thrown. Claims in rounds until the target is
  * reached or nothing is due, so it can drain more than one claim page.
+ * `leaseLost` counts claimed jobs another worker took over before this drain
+ * reached them (its batch ran past the lease); those are left to that worker.
  */
-export async function drainGranolaIngestionJobs(limit = 10): Promise<{ processed: number; failed: number }> {
+export async function drainGranolaIngestionJobs(limit = 10): Promise<{ processed: number; failed: number; leaseLost: number }> {
   let processed = 0;
   let failed = 0;
+  let leaseLost = 0;
   const target = Math.max(Math.trunc(limit), 0);
 
-  while (processed + failed < target) {
-    const jobs = claimIngestionJobs(target - processed - failed);
+  while (processed + failed + leaseLost < target) {
+    const jobs = claimIngestionJobs(target - processed - failed - leaseLost);
     if (jobs.length === 0) break;
 
     const fallbackJobs: IngestionJobRecord[] = [];
@@ -163,7 +169,7 @@ export async function drainGranolaIngestionJobs(limit = 10): Promise<{ processed
               bypassApproval: queued.options.bypassApproval,
               settings,
             });
-            if (held) completeIngestionJob(job.id, workflowResultSummary(held));
+            if (held) completeIngestionJob(job.id, workflowResultSummary(held), job.leaseToken);
             return held;
           });
           if (!result) {
@@ -172,23 +178,32 @@ export async function drainGranolaIngestionJobs(limit = 10): Promise<{ processed
           }
           processed += 1;
         } catch (error) {
-          failIngestionJob(job.id, error);
+          failIngestionJob(job.id, error, job.leaseToken);
           failed += 1;
         }
       }
     });
 
+    // Network jobs (model, Notion, Discord) can take long, so they are not
+    // held while earlier ones run: hand them back without counting an
+    // attempt, then claim and run them one at a time, each under its own lease.
     for (const job of fallbackJobs) {
+      if (job.leaseToken === undefined || !releaseIngestionJob(job.id, job.leaseToken)) leaseLost += 1;
+    }
+    for (let started = 0; started < fallbackJobs.length && processed + failed + leaseLost < target; started += 1) {
+      const job = claimNextIngestionJob();
+      if (!job) break;
       try {
-        await processClaimedGranolaIngestionJob(job);
-        processed += 1;
+        const run = await processClaimedGranolaIngestionJob(job);
+        if (run.owned) processed += 1;
+        else leaseLost += 1;
       } catch {
         failed += 1;
       }
     }
   }
 
-  return { processed, failed };
+  return { processed, failed, leaseLost };
 }
 
 export function getIngestionQueueSnapshot(options: PageOptions = {}): IngestionQueueSnapshot {

@@ -106,7 +106,13 @@ The admin server starts three polling workers. Each is a thin loop over a durabl
 
 Because the workers belong to the admin server, running the bot with `PERRY_ADMIN_SERVER=false` also means no workers run. The queues can always be drained by hand through the API.
 
-The ingestion and graph sync queues share one engine (`src/store/job-queue.ts`). A failed job is retried with exponential backoff until it runs out of attempts. A claim holds a job for a lease, `PERRY_JOB_LEASE_MS` (default ten minutes); a job still `processing` after that is presumed abandoned by a crashed worker, and the next claim reclaims it, counting the lost run as an attempt.
+The ingestion and graph sync queues share one engine (`src/store/job-queue.ts`). A failed job is retried with exponential backoff until it runs out of attempts.
+
+Each claim stamps its job with a unique lease token and holds it for `PERRY_JOB_LEASE_MS` (default ten minutes) from its last renewal. A job still `processing` after that is presumed abandoned by a crashed worker, and the next claim reclaims it, counting the lost run as an attempt. Healthy work never loses its lease:
+
+- **Claimed as started.** Drains claim network jobs (model, Notion, Discord, Graphiti) one at a time, just before running them, so none waits in a claimed batch while its lease runs down. The ingestion drain still batches approval-only jobs, which touch only SQLite and finish inside one transaction, and hands any network job it claimed back with `release`, which does not count an attempt.
+- **Heartbeat.** While a job runs, its lease is renewed every third of the lease period, so a slow call is never mistaken for a crash.
+- **Fencing.** `complete` and `fail` succeed only for the current lease holder. A worker whose job was reclaimed cannot record an outcome over the new holder's; the attempt is logged as a `stale_result` audit event instead.
 
 ## Source layout
 

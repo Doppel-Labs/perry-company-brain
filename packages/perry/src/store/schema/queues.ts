@@ -14,7 +14,8 @@ export const queuesSchema = `
     last_error TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    meeting_id TEXT -- the meeting the job ingests; marked failed when the job is retired mid-publish
+    meeting_id TEXT, -- the meeting the job ingests; marked failed when the job is retired mid-publish
+    lease_token TEXT -- identifies the claim holding a processing job; fences complete/fail
   );
 
   CREATE TABLE IF NOT EXISTS idempotency_keys (
@@ -36,7 +37,8 @@ export const queuesSchema = `
     locked_at TEXT,
     last_error TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    lease_token TEXT -- identifies the claim holding a processing job; fences complete/fail
   );
 
   CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_status_not_before ON ingestion_jobs(status, not_before, created_at);

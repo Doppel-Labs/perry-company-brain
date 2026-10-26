@@ -10,9 +10,19 @@ import { publishingSchema } from "./publishing";
 import { queuesSchema } from "./queues";
 import { graphSchema } from "./graph";
 import { searchSchema } from "./search";
-import { migrateApprovalSummaryColumns, migrateDryRunMeetingStatus, migrateIngestionJobMeetingColumn } from "./migrations";
+import {
+  migrateApprovalSummaryColumns,
+  migrateDryRunMeetingStatus,
+  migrateIngestionJobMeetingColumn,
+  migrateJobLeaseTokenColumns,
+} from "./migrations";
 
-export { migrateApprovalSummaryColumns, migrateDryRunMeetingStatus, migrateIngestionJobMeetingColumn } from "./migrations";
+export {
+  migrateApprovalSummaryColumns,
+  migrateDryRunMeetingStatus,
+  migrateIngestionJobMeetingColumn,
+  migrateJobLeaseTokenColumns,
+} from "./migrations";
 
 /** Applies the full schema and the migrations to an open database. */
 export function migrateOpenDb(db: DatabaseSync): void {
@@ -24,6 +34,7 @@ export function migrateOpenDb(db: DatabaseSync): void {
   db.exec(searchSchema);
   migrateApprovalSummaryColumns(db);
   migrateIngestionJobMeetingColumn(db);
+  migrateJobLeaseTokenColumns(db);
   migrateDryRunMeetingStatus(db);
 }
 

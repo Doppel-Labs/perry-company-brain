@@ -101,14 +101,16 @@ export function enqueueGraphSyncJob(input: {
  * change-set `failed`, both with `reason`. Writes a `graph_sync.skipped_invalid`
  * audit row. Undefined if the job is gone.
  */
-export function skipInvalidGraphSyncJob(id: string, reason: string): GraphSyncJobRecord | undefined {
+export function skipInvalidGraphSyncJob(id: string, reason: string, leaseToken?: string): GraphSyncJobRecord | undefined {
   return withDb((db) =>
     withBrainTransaction(() => {
       const now = new Date().toISOString();
+      // Fenced like complete/fail: only the current lease holder may retire the job.
+      const fence = leaseToken === undefined ? "" : " AND status = 'processing' AND lease_token = ?";
       const result = statement(
         db,
-        "UPDATE graph_sync_jobs SET status = ?, locked_at = NULL, last_error = ?, updated_at = ? WHERE id = ?"
-      ).run("failed", reason, now, id);
+        `UPDATE graph_sync_jobs SET status = ?, locked_at = NULL, lease_token = NULL, last_error = ?, updated_at = ? WHERE id = ?${fence}`
+      ).run("failed", reason, now, id, ...(leaseToken === undefined ? [] : [leaseToken]));
       if (Number(result.changes) === 0) return undefined;
       markGraphChangeSetFailed(db, id, reason, "failed");
       insertAudit(db, "graph_sync.skipped_invalid", "graph_sync_job", id, { reason });
@@ -138,5 +140,8 @@ const queue = createJobQueue<GraphSyncJobRecord>({
 export const claimGraphSyncJobs = queue.claim;
 export const completeGraphSyncJob = queue.complete;
 export const failGraphSyncJob = queue.fail;
+export const renewGraphSyncJobLease = queue.renew;
+export const releaseGraphSyncJob = queue.release;
+export const withGraphSyncJobLease = queue.withLease;
 export const getGraphSyncQueueStats = queue.stats;
 export const listGraphSyncJobs = queue.list;

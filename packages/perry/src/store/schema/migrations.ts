@@ -17,6 +17,16 @@ export function migrateIngestionJobMeetingColumn(db: DatabaseSync): void {
 }
 
 /**
+ * Adds `lease_token` to both queue tables created before it existed. A job an
+ * older version left `processing` has no token, so it can no longer be renewed
+ * and is reclaimed once its lease expires. Idempotent.
+ */
+export function migrateJobLeaseTokenColumns(db: DatabaseSync): void {
+  addColumnIfMissing(db, "ingestion_jobs", "lease_token", "TEXT");
+  addColumnIfMissing(db, "graph_sync_jobs", "lease_token", "TEXT");
+}
+
+/**
  * Older versions stored meetings held for approval with status `dry-run`.
  * Previews were never stored, so every stored `dry-run` row is a held meeting:
  * rename it to `pending_approval`. Idempotent, and cheap once done (indexed).

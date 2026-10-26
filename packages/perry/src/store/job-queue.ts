@@ -33,15 +33,23 @@
 // at the limit it becomes `failed` (terminal; nothing re-queues it). Each queue
 // picks its own cap: 60 s for ingestion, 5 min for graph-sync.
 //
-// Lease: `locked_at` is the claim time, and a claim holds its job for
-// PERRY_JOB_LEASE_MS (default 10 minutes). A job still `processing` after that
-// is presumed abandoned by a crashed or stalled worker. The next claim counts
-// the lost run as a failed attempt: below `max_attempts` the job is re-queued,
-// due at once, and can be claimed by that same call; at the limit it is retired
-// to `failed` (running the `onFail` hook). A worker that was only slow may
-// still finish after its job was reclaimed, so a job's work must be safe to
-// repeat; the ingestion workflow resumes a half-published meeting instead of
-// publishing it twice.
+// Lease: each claim stamps its job with a fresh `lease_token` and sets
+// `locked_at`, and holds the job for PERRY_JOB_LEASE_MS (default 10 minutes)
+// from the last renewal. A job still `processing` after that is presumed
+// abandoned by a crashed or stalled worker. The next claim counts the lost run
+// as a failed attempt: below `max_attempts` the job is re-queued, due at once,
+// and can be claimed by that same call; at the limit it is retired to `failed`
+// (running the `onFail` hook).
+//
+// Healthy work never loses its lease. Drains claim slow (network) jobs one at
+// a time, as they start, rather than holding a batch of them; a job claimed
+// but not run is handed back with release(), which does not count an attempt.
+// withLease() renews a job's lease as it starts (skipping it if another worker
+// has taken it over) and keeps renewing it while the job runs, so a slow model
+// or Notion call is not mistaken for a crash. complete() and fail() are fenced
+// by the token: a worker whose lease was reclaimed cannot record an outcome
+// over the new holder's.
+import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { type PageOptions, type Row } from "./types";
 import { insertAudit, statement, withBrainTransaction, withDb } from "./database";
@@ -64,6 +72,16 @@ export interface JobQueueStats {
   failed: number;
 }
 
+/** What every job record exposes to the engine: its id and the lease token of its current claim. */
+export interface LeasedJob {
+  id: string;
+  /** Set while the job is `processing`; identifies the claim that holds it. */
+  leaseToken?: string;
+}
+
+/** Outcome of withLease(): `owned: false` means another worker holds the job and `work` never ran. */
+export type LeaseRun<R> = { owned: true; value: R } | { owned: false };
+
 /** Per-queue configuration; `table` and `claim.where` are interpolated into SQL, so they must be trusted constants. */
 export interface JobQueueConfig<T> {
   /** Job table; must have the standard columns described above. */
@@ -83,17 +101,36 @@ export interface JobQueueConfig<T> {
 }
 
 /** The operations a queue module re-exports under its own names (e.g. `claimIngestionJobs`). */
-export interface JobQueue<T> {
+export interface JobQueue<T extends LeasedJob> {
   /**
    * Atomically reclaim expired leases, then claim up to `limit` (default 10,
    * max 1000) due jobs, oldest first (queued → processing). `limit <= 0`
    * does nothing.
    */
   claim(limit?: number): T[];
-  /** Mark a job completed, storing `result` as JSON; returns the updated record (or undefined if gone). Does not check the current status. */
-  complete(id: string, result: unknown): T | undefined;
-  /** Record a failure (stores the error message): retire after `max_attempts`, else re-queue with backoff. Undefined if the job is gone. */
-  fail(id: string, error: unknown): T | undefined;
+  /**
+   * Mark a job completed, storing `result` as JSON; returns the updated record.
+   * With `leaseToken`, only the current lease holder can complete: a stale
+   * worker gets undefined and changes nothing. Without it, the id alone decides.
+   */
+  complete(id: string, result: unknown, leaseToken?: string): T | undefined;
+  /**
+   * Record a failure (stores the error message): retire after `max_attempts`,
+   * else re-queue with backoff. Fenced by `leaseToken` like complete().
+   * Undefined if the job is gone or the lease is no longer held.
+   */
+  fail(id: string, error: unknown, leaseToken?: string): T | undefined;
+  /** Extend the lease of a job still held under `leaseToken`; false if the job was reclaimed or finished. */
+  renew(id: string, leaseToken: string): boolean;
+  /** Hand a claimed job back to the queue, due now, without counting an attempt; false if the lease is no longer held. */
+  release(id: string, leaseToken: string): boolean;
+  /**
+   * Runs `work` for a claimed job while holding its lease: renews it first (so
+   * a job that waited in a batch starts with a full lease), then every third of
+   * the lease while `work` runs. If the lease was already lost, `work` does not
+   * run and the result is `{ owned: false }`.
+   */
+  withLease<R>(job: T, work: () => Promise<R>): Promise<LeaseRun<R>>;
   /** Count of jobs by status. */
   stats(): JobQueueStats;
   /** Most-recent jobs first, paginated (default 50, max 200). */
@@ -101,7 +138,7 @@ export interface JobQueue<T> {
 }
 
 /** Builds the queue operations for one job table. Pure setup: nothing touches the database until an operation runs. */
-export function createJobQueue<T>(config: JobQueueConfig<T>): JobQueue<T> {
+export function createJobQueue<T extends LeasedJob>(config: JobQueueConfig<T>): JobQueue<T> {
   const { table, mapRow, events, backoff } = config;
   const claimWhere = config.claim ? `${config.claim.where} AND ` : "";
   const claimParams = config.claim?.params ?? [];
@@ -120,9 +157,10 @@ export function createJobQueue<T>(config: JobQueueConfig<T>): JobQueue<T> {
         ).all(...claimParams, "queued", now, n) as Row[];
         if (rows.length === 0) return [];
         for (const row of rows) {
-          statement(db, `UPDATE ${table} SET status = ?, locked_at = ?, updated_at = ? WHERE id = ?`).run(
+          statement(db, `UPDATE ${table} SET status = ?, locked_at = ?, lease_token = ?, updated_at = ? WHERE id = ?`).run(
             "processing",
             now,
+            randomUUID(),
             now,
             String(row.id)
           );
@@ -168,7 +206,7 @@ export function createJobQueue<T>(config: JobQueueConfig<T>): JobQueue<T> {
     // A retired job keeps not_before = now; `retryAt` only matters for a re-queue.
     statement(
       db,
-      `UPDATE ${table} SET status = ?, attempts = ?, locked_at = NULL, last_error = ?, not_before = ?, updated_at = ? WHERE id = ?`
+      `UPDATE ${table} SET status = ?, attempts = ?, locked_at = NULL, lease_token = NULL, last_error = ?, not_before = ?, updated_at = ? WHERE id = ?`
     ).run(status, attempts, message, finalFailure ? now : retryAt, now, id);
     config.onFail?.(db, id, message, status);
     insertAudit(db, finalFailure ? `${events.prefix}.failed` : `${events.prefix}.${retryEvent}`, events.entity, id, {
@@ -177,13 +215,26 @@ export function createJobQueue<T>(config: JobQueueConfig<T>): JobQueue<T> {
     });
   }
 
-  function complete(id: string, result: unknown): T | undefined {
+  // The WHERE clause that fences a write to the current lease holder (or, with
+  // no token, to the id alone, for callers that do not hold a lease).
+  function owner(leaseToken: string | undefined): { sql: string; params: string[] } {
+    return leaseToken === undefined
+      ? { sql: "id = ?", params: [] }
+      : { sql: "id = ? AND status = 'processing' AND lease_token = ?", params: [leaseToken] };
+  }
+
+  function complete(id: string, result: unknown, leaseToken?: string): T | undefined {
     return withDb((db) => {
       const now = new Date().toISOString();
-      statement(
+      const fence = owner(leaseToken);
+      const updated = statement(
         db,
-        `UPDATE ${table} SET status = ?, result_json = ?, locked_at = NULL, last_error = NULL, updated_at = ? WHERE id = ?`
-      ).run("completed", JSON.stringify(result), now, id);
+        `UPDATE ${table} SET status = ?, result_json = ?, locked_at = NULL, lease_token = NULL, last_error = NULL, updated_at = ? WHERE ${fence.sql}`
+      ).run("completed", JSON.stringify(result), now, id, ...fence.params);
+      if (Number(updated.changes) === 0) {
+        if (leaseToken !== undefined) insertAudit(db, `${events.prefix}.stale_result`, events.entity, id, { outcome: "completed" });
+        return undefined;
+      }
       config.onComplete?.(db, id, now);
       insertAudit(db, `${events.prefix}.completed`, events.entity, id, {});
       const row = statement(db, byId).get(id) as Row | undefined;
@@ -191,11 +242,17 @@ export function createJobQueue<T>(config: JobQueueConfig<T>): JobQueue<T> {
     });
   }
 
-  function fail(id: string, error: unknown): T | undefined {
+  function fail(id: string, error: unknown, leaseToken?: string): T | undefined {
     return withDb((db) => {
       const now = new Date().toISOString();
-      const row = statement(db, `SELECT id, attempts, max_attempts FROM ${table} WHERE id = ?`).get(id) as Row | undefined;
-      if (!row) return undefined;
+      const fence = owner(leaseToken);
+      const row = statement(db, `SELECT id, attempts, max_attempts FROM ${table} WHERE ${fence.sql}`).get(id, ...fence.params) as
+        | Row
+        | undefined;
+      if (!row) {
+        if (leaseToken !== undefined) insertAudit(db, `${events.prefix}.stale_result`, events.entity, id, { outcome: "failed" });
+        return undefined;
+      }
       const attempts = Number(row.attempts) + 1;
       const retryAt = new Date(
         Date.now() + Math.min(backoff.capMs, 1000 * 2 ** Math.min(attempts, backoff.maxExp))
@@ -204,6 +261,45 @@ export function createJobQueue<T>(config: JobQueueConfig<T>): JobQueue<T> {
       recordFailure(db, row, message, now, retryAt, "retry_queued");
       return mapRow(statement(db, byId).get(id) as Row);
     });
+  }
+
+  function renew(id: string, leaseToken: string): boolean {
+    return withDb((db) => {
+      const now = new Date().toISOString();
+      const renewed = statement(
+        db,
+        `UPDATE ${table} SET locked_at = ?, updated_at = ? WHERE id = ? AND status = 'processing' AND lease_token = ?`
+      ).run(now, now, id, leaseToken);
+      return Number(renewed.changes) > 0;
+    });
+  }
+
+  function release(id: string, leaseToken: string): boolean {
+    return withDb((db) => {
+      const now = new Date().toISOString();
+      const released = statement(
+        db,
+        `UPDATE ${table} SET status = 'queued', locked_at = NULL, lease_token = NULL, not_before = ?, updated_at = ?
+         WHERE id = ? AND status = 'processing' AND lease_token = ?`
+      ).run(now, now, id, leaseToken);
+      return Number(released.changes) > 0;
+    });
+  }
+
+  async function withLease<R>(job: T, work: () => Promise<R>): Promise<LeaseRun<R>> {
+    const token = job.leaseToken;
+    if (token === undefined || !renew(job.id, token)) return { owned: false };
+    // Renew well inside the lease so one slow call cannot outlive it; unref so
+    // the timer never keeps the process alive on its own.
+    const heartbeat = setInterval(() => {
+      if (!renew(job.id, token)) clearInterval(heartbeat);
+    }, Math.max(Math.floor(jobLeaseMs() / 3), 10));
+    heartbeat.unref();
+    try {
+      return { owned: true, value: await work() };
+    } finally {
+      clearInterval(heartbeat);
+    }
   }
 
   function stats(): JobQueueStats {
@@ -227,5 +323,5 @@ export function createJobQueue<T>(config: JobQueueConfig<T>): JobQueue<T> {
     );
   }
 
-  return { claim, complete, fail, stats, list };
+  return { claim, complete, fail, renew, release, withLease, stats, list };
 }

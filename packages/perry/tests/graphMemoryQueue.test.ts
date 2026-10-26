@@ -78,7 +78,7 @@ test("queues and drains Graphiti meeting sync jobs", async () => {
     assert.equal("payloadJson" in getGraphSyncQueueSnapshot({ limit: 1 }).recent[0], false);
 
     const drained = await drainGraphSyncJobs(10);
-    assert.deepEqual(drained, { processed: 1, failed: 0, skipped: 0 });
+    assert.deepEqual(drained, { processed: 1, failed: 0, skipped: 0, leaseLost: 0 });
     assert.equal(received.length, 1);
     assert.equal(getGraphSyncQueueSnapshot({ limit: 0 }).stats.completed, 1);
     assert.equal(getGraphChangeSetByJobId(job.id)?.applyStatus, "applied");
@@ -166,7 +166,7 @@ test("can drain graph sync jobs through the direct change-set endpoint", async (
     assert.equal(listGraphChangeSets({ limit: 10 }).length, 1);
     assert.equal(getGraphChangeSetByJobId(job.id)?.applyStatus, "queued");
     const drained = await drainGraphSyncJobs(1);
-    assert.deepEqual(drained, { processed: 1, failed: 0, skipped: 0 });
+    assert.deepEqual(drained, { processed: 1, failed: 0, skipped: 0, leaseLost: 0 });
     assert.equal(received.length, 1);
     const payload = received[0] as {
       groupId: string;
@@ -251,7 +251,7 @@ test("invalid change sets are stored for review but never posted, materialized, 
     enqueueGraphSyncJob({ id: "graph-sync:meeting:legacy-invalid", entityId: "legacy-invalid", payloadJson: episode(false) });
 
     const drained = await drainGraphSyncJobs(10);
-    assert.deepEqual(drained, { processed: 0, failed: 0, skipped: 1 });
+    assert.deepEqual(drained, { processed: 0, failed: 0, skipped: 1, leaseLost: 0 });
     assert.deepEqual(received, []);
     const legacy = getFullGraphSyncQueueSnapshot({ limit: 10 }).recent.find((item) => item.id === "graph-sync:meeting:legacy-invalid");
     assert.equal(legacy?.status, "failed");

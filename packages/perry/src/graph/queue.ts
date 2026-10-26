@@ -15,6 +15,7 @@ import {
   invalidChangeSetReason,
   listGraphSyncJobs,
   skipInvalidGraphSyncJob,
+  withGraphSyncJobLease,
   type GraphSyncJobRecord,
   type GraphSyncQueueStats,
   type PageOptions,
@@ -77,40 +78,51 @@ export function enqueueMeetingGraphSync(input: GraphMemorySyncInput): GraphSyncJ
  * until max attempts) rather than thrown. `skipped` counts claimed jobs whose
  * change set failed validation: they are retired as failed without being
  * posted. A no-op when graph memory is disabled.
+ * `leaseLost` counts claimed jobs another worker took over before this drain
+ * reached them; those are left to that worker.
  */
-export async function drainGraphSyncJobs(limit = 10): Promise<{ processed: number; failed: number; skipped: number }> {
+export async function drainGraphSyncJobs(
+  limit = 10
+): Promise<{ processed: number; failed: number; skipped: number; leaseLost: number }> {
   const status = getGraphMemoryStatus();
-  if (!status.enabled) return { processed: 0, failed: 0, skipped: 0 };
+  if (!status.enabled) return { processed: 0, failed: 0, skipped: 0, leaseLost: 0 };
 
   let processed = 0;
   let failed = 0;
   let skipped = 0;
+  let leaseLost = 0;
   const target = Math.max(Math.trunc(limit), 0);
 
-  while (processed + failed + skipped < target) {
-    const jobs = claimGraphSyncJobs(target - processed - failed - skipped);
+  while (processed + failed + skipped + leaseLost < target) {
+    // Claim one job at a time, as it starts: each post is a network call, so a
+    // claimed batch would sit waiting while its leases ran down.
+    const jobs = claimGraphSyncJobs(1);
     if (jobs.length === 0) break;
 
     for (const job of jobs) {
       try {
-        const payload = JSON.parse(job.payloadJson) as GraphitiEpisodePayload;
-        const validationErrors = invalidPayloadErrors(payload);
-        if (validationErrors) {
-          skipInvalidGraphSyncJob(job.id, invalidChangeSetReason(validationErrors));
-          skipped += 1;
-          continue;
-        }
-        await postGraphitiEpisode(payload, status);
-        completeGraphSyncJob(job.id, { posted: true, name: payload.name, groupId: payload.groupId });
-        processed += 1;
+        const run = await withGraphSyncJobLease(job, async () => {
+          const payload = JSON.parse(job.payloadJson) as GraphitiEpisodePayload;
+          const validationErrors = invalidPayloadErrors(payload);
+          if (validationErrors) {
+            skipInvalidGraphSyncJob(job.id, invalidChangeSetReason(validationErrors), job.leaseToken);
+            return "skipped" as const;
+          }
+          await postGraphitiEpisode(payload, status);
+          completeGraphSyncJob(job.id, { posted: true, name: payload.name, groupId: payload.groupId }, job.leaseToken);
+          return "processed" as const;
+        });
+        if (!run.owned) leaseLost += 1;
+        else if (run.value === "skipped") skipped += 1;
+        else processed += 1;
       } catch (error) {
-        failGraphSyncJob(job.id, error);
+        failGraphSyncJob(job.id, error, job.leaseToken);
         failed += 1;
       }
     }
   }
 
-  return { processed, failed, skipped };
+  return { processed, failed, skipped, leaseLost };
 }
 
 /** Queue counts plus a page of recent jobs, without payloads. */

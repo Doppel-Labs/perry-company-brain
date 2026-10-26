@@ -177,6 +177,8 @@ export interface IngestionJobRecord {
   maxAttempts: number;
   notBefore: string;
   lockedAt?: string;
+  /** Identifies the claim holding the job while it is `processing`. */
+  leaseToken?: string;
   lastError?: string;
   createdAt: string;
   updatedAt: string;
@@ -200,6 +202,8 @@ export interface GraphSyncJobRecord {
   maxAttempts: number;
   notBefore: string;
   lockedAt?: string;
+  /** Identifies the claim holding the job while it is `processing`. */
+  leaseToken?: string;
   lastError?: string;
   createdAt: string;
   updatedAt: string;

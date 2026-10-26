@@ -133,7 +133,7 @@ Precedence is the same for every editable setting: **environment variables are d
 | `PERRY_WEBHOOK_MODE` | `inline` | `queue` makes every webhook call enqueue a job and return immediately. |
 | `PERRY_INGESTION_WORKER` | `false` | `true` drains the ingestion queue continuously. |
 | `PERRY_INGESTION_INTERVAL_MS` | `1000` | Ingestion worker polling interval. |
-| `PERRY_JOB_LEASE_MS` | `600000` | How long a claimed ingestion or graph-sync job may stay `processing` before another claim reclaims it (counted as a failed attempt). |
+| `PERRY_JOB_LEASE_MS` | `600000` | How long a claimed ingestion or graph-sync job is held without a renewal. Running jobs renew it continuously, so it only expires for a crashed or stalled worker; the next claim then reclaims the job, counted as a failed attempt. |
 | `PERRY_DEFAULT_PUBLISH_MODE` | `approval` | Publish mode when no routing rule matches: `approval`, `auto`, or `draft`. |
 | `GRANOLA_MODE` | `manual` | `manual` or `zapier-webhook`. Informational: it changes only the readiness diagnostics, and the webhook works in either mode. `api-poll` is **not implemented** (nothing polls Granola); diagnostics warns if it is selected. Use `zapier-webhook`. |
 | `GRANOLA_FOLDER_NAME` | none | Reserved for the unimplemented API poller; has no effect. To route by Granola folder, set a folder on a routing rule. |

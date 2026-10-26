@@ -101,5 +101,8 @@ export function claimNextIngestionJob(): IngestionJobRecord | undefined {
 export const claimIngestionJobs = queue.claim;
 export const completeIngestionJob = queue.complete;
 export const failIngestionJob = queue.fail;
+export const renewIngestionJobLease = queue.renew;
+export const releaseIngestionJob = queue.release;
+export const withIngestionJobLease = queue.withLease;
 export const getIngestionQueueStats = queue.stats;
 export const listIngestionJobs = queue.list;
