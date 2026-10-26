@@ -801,8 +801,16 @@ textarea {
   color: #1d5b42;
 }
 
+/* Written but not confirmed by readback: a warning, between applied and failed. */
+.pill.unverified {
+  background: #f7e6cc;
+  color: #8a4a0e;
+}
+
 .pill.queued,
-.pill.processing {
+.pill.processing,
+.pill.publishing,
+.pill.pending_approval {
   background: #e9e4d6;
   color: #725118;
 }
@@ -1038,4 +1046,15 @@ textarea {
   color: #687268;
   font-size: 12px;
   line-height: 1.35;
+}
+
+.preview-knowledge ul {
+  margin: 4px 0 10px;
+  padding-left: 18px;
+}
+
+.preview-extraction {
+  margin: 8px 0;
+  font-size: 0.85em;
+  opacity: 0.75;
 }
