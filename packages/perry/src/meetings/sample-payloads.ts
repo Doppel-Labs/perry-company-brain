@@ -1,3 +1,6 @@
+// meetings/sample-payloads — a fixture Granola/Zapier payload for previews and smoke checks.
+
+/** A realistic webhook body served by the admin sample endpoint and used by scripts/together-smoke.cjs. */
 export const sampleGranolaZapierPayload = {
   note_id: "sample-granola-note",
   title: "Weekly Product Review",

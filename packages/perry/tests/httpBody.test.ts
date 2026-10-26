@@ -1,9 +1,11 @@
+// Bounded JSON bodies, ported from the Doppel Labs security fix (8f977f7) onto
+// the http/request module.
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createServer, request, type IncomingMessage } from "node:http";
 import { Readable } from "node:stream";
 import test from "node:test";
-import { MAX_JSON_BODY_BYTES, readJson } from "../src/server/http-body";
+import { maxJsonBodyBytes as MAX_JSON_BODY_BYTES, readJson } from "../src/server/http/request";
 import { createAdminHttpServer } from "../src/server/http";
 
 function body(parts: Array<Buffer | string>, headers: IncomingMessage["headers"] = {}): IncomingMessage {

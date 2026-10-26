@@ -1,3 +1,4 @@
+// types/node-sqlite.d.ts — minimal ambient types for Node's built-in synchronous SQLite API.
 declare module "node:sqlite" {
   export class DatabaseSync {
     constructor(path: string);

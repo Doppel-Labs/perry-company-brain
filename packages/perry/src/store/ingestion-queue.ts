@@ -1,13 +1,37 @@
-// ingestion-queue — split out of the former monolithic meeting-store.ts
-import { join } from "node:path";
-import { type IngestionJobRecord, type IngestionQueueStats, type PageOptions, type Row } from "./types";
-import { insertAudit, normalizePage, statement, withBrainTransaction, withDb } from "./db";
+// ingestion-queue — the store side of the durable Granola ingestion queue (table `ingestion_jobs`).
+//
+// Rows are written here and run through the shared engine in job-queue.ts;
+// the processing loop that drives them lives in src/ingestion/queue.ts.
+//
+// Each job records the id of the meeting it ingests (`meeting_id`). When a job
+// is retired (out of attempts, by a failure or an expired lease) while its
+// meeting is mid-publish, the meeting is marked `failed` in the same write.
+import type { DatabaseSync } from "node:sqlite";
+import { type IngestionJobRecord, type Row } from "./types";
+import { insertAudit, statement, withBrainTransaction, withDb } from "./database";
 import { ingestionJobFromRow } from "./rows";
+import { createJobQueue } from "./job-queue";
+import { markMeetingFailedInDb } from "./meetings";
 
+/**
+ * Enqueue a Granola ingestion job, keyed by idempotency: a replayed webhook
+ * (same idempotency key) returns the existing job with `created: false`
+ * instead of queuing a duplicate, whatever that job's status. A new job starts
+ * `queued`, due immediately, with `maxAttempts` 5 by default. Runs in one
+ * transaction with an `ingestion_job.queued` audit row.
+ *
+ * `meetingId` (from meetingIdForNote) links the job to its meeting so a
+ * retired job can mark that meeting failed.
+ *
+ * The key is also written to `idempotency_keys`, but dedupe reads
+ * `ingestion_jobs.idempotency_key` directly, and the ledger row cascades away
+ * with its job, so the ledger adds no guarantee of its own today.
+ */
 export function enqueueIngestionJob(input: {
   id: string;
   idempotencyKey: string;
   payloadJson: string;
+  meetingId?: string;
   type?: IngestionJobRecord["type"];
   maxAttempts?: number;
 }): { job: IngestionJobRecord; created: boolean } {
@@ -22,10 +46,10 @@ export function enqueueIngestionJob(input: {
       statement(
         db,
         `INSERT INTO ingestion_jobs (
-        id, type, idempotency_key, status, payload_json, attempts, max_attempts,
-        not_before, created_at, updated_at
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          id, type, idempotency_key, status, payload_json, attempts, max_attempts,
+          not_before, created_at, updated_at, meeting_id
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         input.id,
         input.type ?? "granola.ingest",
@@ -36,7 +60,8 @@ export function enqueueIngestionJob(input: {
         input.maxAttempts ?? 5,
         now,
         now,
-        now
+        now,
+        input.meetingId ?? null
       );
       statement(db, "INSERT INTO idempotency_keys (key, job_id, created_at) VALUES (?, ?, ?)").run(
         input.idempotencyKey,
@@ -50,116 +75,34 @@ export function enqueueIngestionJob(input: {
   );
 }
 
+// claim(batch) / complete / fail / stats / list come from the shared engine.
+// Claims are restricted to type 'granola.ingest'; retries back off up to 60 s.
+const queue = createJobQueue<IngestionJobRecord>({
+  table: "ingestion_jobs",
+  mapRow: ingestionJobFromRow,
+  events: { prefix: "ingestion_job", entity: "ingestion_job" },
+  backoff: { capMs: 60_000, maxExp: 6 },
+  claim: { where: "type = ?", params: ["granola.ingest"] },
+  onFail: (db, id, message, status) => {
+    if (status === "failed") markJobMeetingFailed(db, id, message);
+  },
+});
+
+function markJobMeetingFailed(db: DatabaseSync, jobId: string, message: string): void {
+  const row = statement(db, "SELECT meeting_id FROM ingestion_jobs WHERE id = ?").get(jobId) as Row | undefined;
+  if (row?.meeting_id) markMeetingFailedInDb(db, String(row.meeting_id), message);
+}
+
+/** Claim the oldest due `granola.ingest` job (queued → processing, reclaiming expired leases first), or undefined if none is due. Used by the background worker. */
 export function claimNextIngestionJob(): IngestionJobRecord | undefined {
-  return withDb((db) =>
-    withBrainTransaction(() => {
-      const now = new Date().toISOString();
-      const row = statement(
-        db,
-        `SELECT * FROM ingestion_jobs
-         WHERE type = ? AND status = ? AND not_before <= ?
-         ORDER BY created_at ASC
-         LIMIT 1`
-      ).get("granola.ingest", "queued", now) as Row | undefined;
-      if (!row) return undefined;
-      const id = String(row.id);
-      statement(db, "UPDATE ingestion_jobs SET status = ?, locked_at = ?, updated_at = ? WHERE id = ?").run(
-        "processing",
-        now,
-        now,
-        id
-      );
-      const claimed = statement(db, "SELECT * FROM ingestion_jobs WHERE id = ?").get(id) as Row;
-      return ingestionJobFromRow(claimed);
-    })
-  );
+  return queue.claim(1)[0];
 }
 
-export function claimIngestionJobs(limit = 10): IngestionJobRecord[] {
-  if (limit <= 0) return [];
-  const normalizedLimit = normalizePage({ limit }, 10, 1000).limit;
-  return withDb((db) =>
-    withBrainTransaction(() => {
-      const now = new Date().toISOString();
-      const rows = statement(
-        db,
-        `SELECT * FROM ingestion_jobs
-         WHERE type = ? AND status = ? AND not_before <= ?
-         ORDER BY created_at ASC
-         LIMIT ?`
-      ).all("granola.ingest", "queued", now, normalizedLimit) as Row[];
-      if (rows.length === 0) return [];
-      for (const row of rows) {
-        statement(db, "UPDATE ingestion_jobs SET status = ?, locked_at = ?, updated_at = ? WHERE id = ?").run(
-          "processing",
-          now,
-          now,
-          String(row.id)
-        );
-      }
-      const placeholders = rows.map(() => "?").join(", ");
-      return statement(db, `SELECT * FROM ingestion_jobs WHERE id IN (${placeholders}) ORDER BY created_at ASC`)
-        .all(...rows.map((row) => String(row.id)))
-        .map((row) => ingestionJobFromRow(row as Row));
-    })
-  );
-}
-
-export function completeIngestionJob(id: string, result: unknown): IngestionJobRecord | undefined {
-  return withDb((db) => {
-    const now = new Date().toISOString();
-    statement(
-      db,
-      "UPDATE ingestion_jobs SET status = ?, result_json = ?, locked_at = NULL, last_error = NULL, updated_at = ? WHERE id = ?"
-    ).run("completed", JSON.stringify(result), now, id);
-    insertAudit(db, "ingestion_job.completed", "ingestion_job", id, {});
-    const row = statement(db, "SELECT * FROM ingestion_jobs WHERE id = ?").get(id) as Row | undefined;
-    return row ? ingestionJobFromRow(row) : undefined;
-  });
-}
-
-export function failIngestionJob(id: string, error: unknown): IngestionJobRecord | undefined {
-  return withDb((db) => {
-    const now = new Date().toISOString();
-    const row = statement(db, "SELECT attempts, max_attempts FROM ingestion_jobs WHERE id = ?").get(id) as Row | undefined;
-    if (!row) return undefined;
-    const attempts = Number(row.attempts) + 1;
-    const maxAttempts = Number(row.max_attempts);
-    const finalFailure = attempts >= maxAttempts;
-    const notBefore = new Date(Date.now() + Math.min(60_000, 1000 * 2 ** Math.min(attempts, 6))).toISOString();
-    const message = error instanceof Error ? error.message : String(error);
-    statement(
-      db,
-      `UPDATE ingestion_jobs
-       SET status = ?, attempts = ?, locked_at = NULL, last_error = ?, not_before = ?, updated_at = ?
-       WHERE id = ?`
-    ).run(finalFailure ? "failed" : "queued", attempts, message, finalFailure ? now : notBefore, now, id);
-    insertAudit(db, finalFailure ? "ingestion_job.failed" : "ingestion_job.retry_queued", "ingestion_job", id, {
-      attempts,
-      error: message,
-    });
-    const updated = statement(db, "SELECT * FROM ingestion_jobs WHERE id = ?").get(id) as Row;
-    return ingestionJobFromRow(updated);
-  });
-}
-
-export function getIngestionQueueStats(): IngestionQueueStats {
-  return withDb((db) => {
-    const rows = statement(db, "SELECT status, COUNT(*) AS count FROM ingestion_jobs GROUP BY status").all() as Row[];
-    const stats: IngestionQueueStats = { queued: 0, processing: 0, completed: 0, failed: 0 };
-    for (const row of rows) {
-      const status = String(row.status) as keyof IngestionQueueStats;
-      if (status in stats) stats[status] = Number(row.count);
-    }
-    return stats;
-  });
-}
-
-export function listIngestionJobs(options: PageOptions = {}): IngestionJobRecord[] {
-  const { limit, offset } = normalizePage(options, 50, 200);
-  return withDb((db) =>
-    statement(db, "SELECT * FROM ingestion_jobs ORDER BY created_at DESC LIMIT ? OFFSET ?")
-      .all(limit, offset)
-      .map((row) => ingestionJobFromRow(row as Row))
-  );
-}
+export const claimIngestionJobs = queue.claim;
+export const completeIngestionJob = queue.complete;
+export const failIngestionJob = queue.fail;
+export const renewIngestionJobLease = queue.renew;
+export const releaseIngestionJob = queue.release;
+export const withIngestionJobLease = queue.withLease;
+export const getIngestionQueueStats = queue.stats;
+export const listIngestionJobs = queue.list;

@@ -13,7 +13,8 @@ const args = parseArgs(process.argv.slice(2));
 const inputPath = args.input ?? args._[0];
 const batchSize = Number(args.batch ?? process.env.PERRY_BACKFILL_BATCH ?? 1000);
 const createApprovals = args.approvals !== "false";
-const status = args.status === "dry-run" ? "dry-run" : "processed";
+// `--status pending_approval` (or the legacy `dry-run`) imports meetings as held for approval.
+const status = args.status === "pending_approval" || args.status === "dry-run" ? "pending_approval" : "processed";
 const suppressAudit = args.audit !== "on";
 
 if (!inputPath) {

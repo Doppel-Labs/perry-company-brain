@@ -1,9 +1,10 @@
+// format — Markdown for the standup posts: daily summaries and missing-standup reminders.
 import type { StandupEntry } from "@notion";
 import type { Person } from "@core";
 
 /**
- * Formats a Date into a human‑readable heading using the local timezone of the
- * host environment.  E.g. "2026-04-15" becomes "Apr 15, 2026".
+ * Formats a Date as a short heading date using the host's default locale and
+ * timezone, e.g. "Apr 15, 2026" in en-US.
  */
 export function formatHeadingDate(date: Date): string {
   return date.toLocaleDateString(undefined, {
@@ -15,9 +16,9 @@ export function formatHeadingDate(date: Date): string {
 
 /**
  * Renders a standup summary into a Markdown string suitable for Discord.
- * Each entry appears under a heading of the submitter's name with their
- * yesterday, today and blockers fields.  Empty fields are omitted.  The
- * summary begins with a bold heading containing the date.
+ * Each entry appears under the submitter's name in bold with their yesterday,
+ * today, blockers and status fields; empty fields are omitted. The summary
+ * begins with a bold heading containing the date.
  */
 export function formatSummary(entries: StandupEntry[], date: Date): string {
   const heading = `**Standup – ${formatHeadingDate(date)}**`;
@@ -39,8 +40,9 @@ export function formatSummary(entries: StandupEntry[], date: Date): string {
 }
 
 /**
- * Renders a missing standup reminder.  If no one is missing, returns an
- * encouraging message.  Otherwise returns a list of mentions.
+ * Renders a missing-standup reminder. If no one is missing, returns an
+ * encouraging message; otherwise lists each person as a Discord mention, or by
+ * name when they have no Discord user id.
  */
 export function formatMissing(
   missing: Person[],

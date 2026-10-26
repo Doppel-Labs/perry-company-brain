@@ -1,3 +1,11 @@
+// health — rule-based health checks over decisions and action items.
+//
+// There is no numeric score: each rule emits issues with a severity, and the
+// report counts them. Critical: open actions with no owner, overdue owned
+// actions, and same-timestamp ownership conflicts. Warning: undated owned
+// actions older than `staleActionDays`, owners at or above `ownerLoadThreshold`
+// open actions, and subjects whose owner changed at least
+// `ownershipChurnThreshold` times. Issues sort critical first, then by type and title.
 import {
   buildCompanyBrainInsights,
   parseOwnershipDecision,
@@ -29,6 +37,7 @@ export interface BrainHealthIssue {
   sourceIds: string[];
 }
 
+/** Rule thresholds. Defaults: now = current time, 30 days, 10 open actions, 2 owner changes; thresholds floor at 1. */
 export interface BrainHealthOptions {
   now?: string;
   staleActionDays?: number;
@@ -56,6 +65,7 @@ export interface CompanyBrainHealthReport {
   issues: BrainHealthIssue[];
 }
 
+/** Runs the health rules over the `limit` most recent decisions and action items. */
 export function getCompanyBrainHealth(limit = 10_000, options: BrainHealthOptions = {}): CompanyBrainHealthReport {
   return buildCompanyBrainHealth(
     {
@@ -66,6 +76,7 @@ export function getCompanyBrainHealth(limit = 10_000, options: BrainHealthOption
   );
 }
 
+/** Pure: evaluates every health rule against the given records. Dates compare by UTC day. */
 export function buildCompanyBrainHealth(
   input: { decisions: DecisionRecord[]; actions: ActionItemRecord[] },
   options: BrainHealthOptions = {}
@@ -177,6 +188,7 @@ function resolveOptions(options: BrainHealthOptions): Required<BrainHealthOption
   };
 }
 
+/** Subjects whose consecutive owners differ at least `threshold` times. */
 function ownershipChurn(history: OwnershipHistoryItem[], threshold: number): Array<{
   subject: string;
   changeCount: number;
@@ -207,6 +219,7 @@ function ownershipChurn(history: OwnershipHistoryItem[], threshold: number): Arr
   return churn;
 }
 
+/** Ownership decisions for one subject that share a createdAt but name different owners. */
 function sameTimeOwnershipConflicts(decisions: DecisionRecord[]): Array<{
   subject: string;
   owners: string[];

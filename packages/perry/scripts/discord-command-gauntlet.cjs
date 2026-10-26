@@ -8,7 +8,7 @@ const live = args.live === "true";
 const register = args.register === "true";
 
 const { REST, Routes } = require("discord.js");
-const { slashCommandData } = require("../dist/discord/client.js");
+const { slashCommandData } = require("../dist/discord/commands.js");
 
 main().catch((error) => {
   console.error(error instanceof Error ? error.stack ?? error.message : error);

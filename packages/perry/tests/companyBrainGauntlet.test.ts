@@ -56,7 +56,7 @@ test("company brain gauntlet posts a Granola note through dry-run sinks and queu
 
     assert.equal(getFullGraphSyncQueueSnapshot({ limit: 5 }).stats.queued, 1);
     const drained = await drainGraphSyncJobs(1);
-    assert.deepEqual(drained, { processed: 1, failed: 0, skipped: 0 });
+    assert.deepEqual(drained, { processed: 1, failed: 0, skipped: 0, leaseLost: 0 });
     assert.equal(bridge.episodes.length, 1);
 
     const episode = bridge.episodes[0] as { body: string; groupId: string; name: string };
@@ -121,7 +121,7 @@ test("graph sync failures stay durable and retry later instead of blocking meeti
     assert.equal(result.record.status, "processed");
 
     const drained = await drainGraphSyncJobs(1);
-    assert.deepEqual(drained, { processed: 0, failed: 1, skipped: 0 });
+    assert.deepEqual(drained, { processed: 0, failed: 1, skipped: 0, leaseLost: 0 });
     const snapshot = getFullGraphSyncQueueSnapshot({ limit: 1 });
     assert.equal(snapshot.stats.queued, 1);
     assert.equal(snapshot.stats.failed, 0);
@@ -129,7 +129,7 @@ test("graph sync failures stay durable and retry later instead of blocking meeti
     assert.match(snapshot.recent[0].lastError ?? "", /503/u);
 
     const immediateRetry = await drainGraphSyncJobs(1);
-    assert.deepEqual(immediateRetry, { processed: 0, failed: 0, skipped: 0 });
+    assert.deepEqual(immediateRetry, { processed: 0, failed: 0, skipped: 0, leaseLost: 0 });
     assert.equal(bridge.episodes.length, 1);
   } finally {
     await bridge.close();

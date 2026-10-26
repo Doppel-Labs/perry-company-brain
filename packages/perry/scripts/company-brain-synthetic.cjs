@@ -10,7 +10,7 @@ const {
   drainGraphSyncJobs,
   getFullGraphSyncQueueSnapshot,
 } = require("../dist/graph/queue.js");
-const { searchGraphMemory } = require("../dist/graph/memory.js");
+const { searchGraphMemory } = require("../dist/graph/memory/index.js");
 const { getCompanyBrainInsights } = require("../dist/brain/insights.js");
 const { projectMultiplayerState } = require("../dist/graph/multiplayer-projection.js");
 const { processGranolaZapierPayload } = require("../dist/ingestion/workflow.js");

@@ -6,6 +6,6 @@ export * from "./github-activity";
 export * from "./health";
 export * from "./insights";
 export * from "./ontology-health";
-export * from "./ontology-queries";
+export * from "./ontology";
 export * from "./queries";
 export * from "./tools";

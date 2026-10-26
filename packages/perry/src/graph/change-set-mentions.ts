@@ -1,9 +1,23 @@
-// change-set-mentions — split out of change-set.ts
+// change-set-mentions — ontology objects mentioned in a meeting's text.
+//
+// Regex extraction over one corpus (title, calendar title, folder, summary,
+// decision and action text). Labelled phrases such as `Risk: ...`, `KPI: ...`
+// or `repo owner/name` become typed entities linked from the meeting, all
+// citing the meeting's evidence. Confidence is fixed per kind (0.62–0.78), below
+// the 0.85–1 used for structured meeting facts, and each extractor keeps at
+// most 12 values. See docs/company-brain-ontology.md for the types.
 import { type GraphEntityType, type GraphEntityUpsert, type GraphRelationAssertion, type GraphRelationType } from "@core";
 import { type GraphMemorySyncInput } from "./memory";
 import { assertRelation, upsertEntity } from "./change-set-builders";
 import { cleanProperties, normalizeKey, projectStableKey, unique } from "./change-set-helpers";
 
+/**
+ * Adds mentioned repositories, customers, policies, goals, metrics, risks,
+ * blockers, open questions, capabilities, features, artifacts and benchmark
+ * reports to `entities`/`relations` in place. With a project, also links it to
+ * the goals, risks, blockers, questions and capabilities; features, metrics and
+ * artifacts are linked to any benchmark reports in the same meeting.
+ */
 export function addMentionedOperatingObjects(
   entities: Map<string, GraphEntityUpsert>,
   relations: GraphRelationAssertion[],
@@ -62,6 +76,8 @@ export function addMentionedOperatingObjects(
     });
     relations.push(assertRelation(meetingKey, "REFERENCES_POLICY", key, evidenceId, referenceTime, 0.72));
   }
+
+  addExtractedEntities(entities, relations, input, meetingKey, evidenceId, referenceTime);
 
   const projectKey = projectName ? projectStableKey(projectName) : undefined;
   const goals = addTypedMentions(entities, relations, corpus, {
@@ -167,6 +183,7 @@ export function addMentionedOperatingObjects(
     ],
   });
 
+  // Cross-links are inferred purely from co-occurring in the same meeting.
   if (projectKey) {
     for (const item of goals) relations.push(assertRelation(projectKey, "SUPPORTS_GOAL", item.key, evidenceId, referenceTime, 0.72));
     for (const item of risks) relations.push(assertRelation(projectKey, "HAS_RISK", item.key, evidenceId, referenceTime, 0.72));
@@ -183,6 +200,44 @@ export function addMentionedOperatingObjects(
   }
   for (const artifact of artifacts) {
     for (const report of benchmarkReports) relations.push(assertRelation(artifact.key, "VALIDATED_BY", report.key, evidenceId, referenceTime, 0.62));
+  }
+}
+
+/** Upserts one entity per extracted mention, linked from the meeting; returns their keys for cross-linking. */
+// Model-extracted entities, already grounded by the extraction pipeline (they
+// appear verbatim in the note). Only types with a meeting-mention relation are
+// linked: projects arrive through routing and people through attendees. Keys
+// match the regex extractors above, so the same repository found both ways
+// merges into one entity. Confidence 0.7 sits with the regex mentions, below
+// structured meeting facts.
+const extractedEntityRelations: Partial<Record<string, GraphRelationType>> = {
+  repository: "MENTIONS_REPOSITORY",
+  customer: "MENTIONS_CUSTOMER",
+  policy: "REFERENCES_POLICY",
+};
+
+function addExtractedEntities(
+  entities: Map<string, GraphEntityUpsert>,
+  relations: GraphRelationAssertion[],
+  input: GraphMemorySyncInput,
+  meetingKey: string,
+  evidenceId: string,
+  referenceTime: string
+): void {
+  for (const entity of input.knowledge.entities ?? []) {
+    const relation = extractedEntityRelations[entity.type];
+    const name = cleanMention(entity.name);
+    if (!relation || !name) continue;
+    const key = `${entity.type}:${normalizeKey(name)}`;
+    upsertEntity(entities, {
+      type: entity.type as GraphEntityType,
+      stableKey: key,
+      name,
+      aliases: unique([name]),
+      properties: {},
+      evidenceIds: [evidenceId],
+    });
+    relations.push(assertRelation(meetingKey, relation, key, evidenceId, referenceTime, 0.7));
   }
 }
 
@@ -229,12 +284,41 @@ function extractTypedMentions(corpus: string, patterns: RegExp[]): string[] {
   return [...values].slice(0, 12);
 }
 
-function isSpecificOperatingMention(value: string): boolean {
+// Words that carry no subject on their own; they never count toward the
+// content-word threshold in isSpecificOperatingMention.
+const vagueWords = new Set([
+  "the", "this", "that", "these", "those", "and", "but", "for", "with", "from", "into", "about", "during",
+  "our", "its", "their", "them", "they", "then", "than", "more", "less", "some", "any", "all", "very", "just",
+  "also", "should", "would", "could", "will", "can", "get", "got", "make", "made", "does", "did", "done", "keep",
+  "going", "thing", "things", "stuff", "better", "soon", "later", "next", "week", "team", "review", "cleanup",
+  "follow",
+]);
+
+/**
+ * True when a mention names something rather than gesturing at it. Rejected
+ * outright: under 4 characters, or a bare filler phrase. Otherwise specific
+ * when it has a marker of a real name: a capital letter after the first
+ * character (a proper noun or acronym, not sentence case after a label), a
+ * digit, path or identifier punctuation (/ _ # or a hyphen), or a technical
+ * unit such as p95, ms or sqlite. Failing those, it needs at least three
+ * content words (3+ letters, not in vagueWords): "adaptive search retries"
+ * passes, "make it better" and "Improve things" do not.
+ */
+export function isSpecificOperatingMention(value: string): boolean {
   if (value.length < 4) return false;
-  if (/^(the|this|that|next|team|review|cleanup|follow up)$/iu.test(value)) return false;
-  return /[A-Z0-9]|\d|\/|-|_|#|\b(?:p50|p90|p95|p99|ms|sec|sqlite|json|md|db|api|slo|okr)\b/iu.test(value);
+  if (/^(the|this|that|next|team|review|cleanup|follow[ -]up)$/iu.test(value)) return false;
+  if (/\p{Lu}/u.test(value.slice(1))) return true;
+  if (/\d|\/|-|_|#/u.test(value)) return true;
+  if (/\b(?:p50|p90|p95|p99|ms|sec|sqlite|json|md|db|api|slo|okr)\b/iu.test(value)) return true;
+  const contentWords = value
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((word) => word.length >= 3 && !vagueWords.has(word));
+  return contentWords.length >= 3;
 }
 
+// GitHub URLs plus `repo X` / `repository X` phrases; a bare name must look like
+// an identifier (contains - _ . or is capitalized) to count.
 function extractRepositories(corpus: string): string[] {
   const repositories = new Set<string>();
   for (const match of corpus.matchAll(/github\.com\/(?<owner>[A-Za-z0-9_.-]+)\/(?<repo>[A-Za-z0-9_.-]+)/gu)) {

@@ -162,6 +162,9 @@ test("admin graph APIs expose sanitized change sets and bounded graph reads", as
     });
     assert(job);
 
+    const unauthorizedList = await fetch(`${baseUrl}/api/graph-sync/change-sets?limit=5`);
+    assert.equal(unauthorizedList.status, 401);
+
     const changeSets = await getJson<{ records: Array<Record<string, unknown>> }>(`${baseUrl}/api/graph-sync/change-sets?limit=5`);
     assert.equal(changeSets.records.length, 1);
     assert.equal(changeSets.records[0].meetingId, "granola:admin-graph-note-1");
@@ -294,6 +297,7 @@ async function closeServer(server: Server): Promise<void> {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 }
 
+/** Authorized request helper: the whole admin API is token-protected. */
 async function getJson<T>(url: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (!headers.has("authorization")) headers.set("authorization", "Bearer admin-graph-test-token");

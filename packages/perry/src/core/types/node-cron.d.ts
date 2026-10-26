@@ -1,3 +1,4 @@
+// types/node-cron.d.ts — minimal ambient types for the parts of node-cron Perry uses.
 declare module "node-cron" {
   export interface ScheduleOptions {
     timezone?: string;

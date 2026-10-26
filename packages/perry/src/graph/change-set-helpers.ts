@@ -1,8 +1,25 @@
-// change-set-helpers — split out of change-set.ts
+// change-set-helpers — project inference, stable-key normalization and small
+// value cleaners shared by the change-set builders.
+import { normalizeStableKey, personStableKey, projectStableKey } from "@core";
 import { type GraphMemorySyncInput } from "./memory";
 
-const knownProjects = ["Wallace", "Perry", "Atlas", "Notion Wiki", "Discord Ops", "Graph Memory"];
+// Stable keys come from @core so readers outside the graph build identical keys.
+export { projectStableKey };
 
+/**
+ * Project names recognized in free text (case-insensitive substring match),
+ * the fallback when a meeting has no routed project. The single list shared by
+ * the change-set builders and the multiplayer projection. Configured routing
+ * rules are deliberately not read here: a routed meeting already carries its
+ * project in `input.route`, and keeping this a constant keeps the builders
+ * pure, so rebuilding a meeting always yields the same keys.
+ */
+export const knownProjects: readonly string[] = ["Wallace", "Perry", "Atlas", "Notion Wiki", "Discord Ops", "Graph Memory"];
+
+/**
+ * The meeting's project: the route's project if set, otherwise the first known
+ * project named in the folder, then the title, then the decision and action text.
+ */
 export function inferProject(input: GraphMemorySyncInput): string | undefined {
   return (
     input.route?.project ??
@@ -17,45 +34,41 @@ export function inferProject(input: GraphMemorySyncInput): string | undefined {
   );
 }
 
+/** The first entry of the known-project list that appears in `text`, if any. */
 export function inferProjectFromText(text: string | undefined): string | undefined {
   if (!text) return undefined;
   return knownProjects.find((project) => text.toLowerCase().includes(project.toLowerCase()));
 }
 
-export function projectStableKey(project: string): string {
-  return `project:${normalizeKey(project)}`;
-}
+/** `person:<key>` from the email when present, else the name, else `unknown`. */
+export const personKey = personStableKey;
 
-export function personKey(name?: string, email?: string): string {
-  return `person:${normalizeKey(email ?? name ?? "unknown")}`;
-}
+/** Slug for stable keys; see normalizeStableKey in @core. */
+export const normalizeKey = normalizeStableKey;
 
-export function normalizeKey(value: string | undefined): string {
-  return (value ?? "unknown")
-    .trim()
-    .toLowerCase()
-    .replace(/https?:\/\//gu, "")
-    .replace(/[^a-z0-9]+/gu, "-")
-    .replace(/^-|-$/gu, "")
-    .slice(0, 160);
-}
-
+/**
+ * Evidence excerpt from a summary: drops any line text after a `private notes:` or
+ * `transcript:` label, collapses whitespace, and truncates to 500 characters.
+ */
 export function compactExcerpt(value: string | undefined): string | undefined {
   if (!value) return undefined;
-  const compact = value
-    .replace(/\bprivate notes?\s*:.*$/gimu, "")
-    .replace(/\btranscript\s*:.*$/gimu, "")
-    .replace(/\s+/gu, " ")
-    .trim();
+  const compact = stripPrivateSections(value).replace(/\s+/gu, " ").trim();
   return compact.length > 500 ? `${compact.slice(0, 497).trimEnd()}...` : compact;
 }
 
+/** Drops the rest of any line after a `private notes:` or `transcript:` label. */
+export function stripPrivateSections(value: string): string {
+  return value.replace(/\bprivate notes?\s*:.*$/gimu, "").replace(/\btranscript\s*:.*$/gimu, "");
+}
+
+/** Normalizes a parseable date to ISO 8601; undefined when missing or unparseable. */
 export function validIso(value: string | undefined): string | undefined {
   if (!value) return undefined;
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
 }
 
+/** Copies properties without the undefined values (null is kept). */
 export function cleanProperties(
   properties: Record<string, string | number | boolean | null | undefined>
 ): Record<string, string | number | boolean | null> {
@@ -66,6 +79,7 @@ export function cleanProperties(
   return output;
 }
 
+/** Trimmed, non-empty strings, deduplicated case-insensitively; the first spelling wins. */
 export function unique(items: Array<string | undefined> | undefined): string[] {
   const seen = new Set<string>();
   const output: string[] = [];

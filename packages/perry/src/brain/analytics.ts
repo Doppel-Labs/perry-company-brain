@@ -1,3 +1,8 @@
+// analytics — aggregate workload, theme, and volume statistics for the whole brain.
+//
+// Themes are crude on purpose: a record's "theme" is its first eight normalized
+// non-stop-words, so near-identical decisions and actions bucket together.
+// Every ratio is rounded to four decimals and is 0 when its denominator is 0.
 import {
   listActionItems,
   listDecisions,
@@ -7,7 +12,9 @@ import {
   type MeetingRecord,
 } from "@store";
 import { buildCompanyBrainHealth, type CompanyBrainHealthReport } from "./health";
+import { paged } from "./paging";
 
+/** One group of records sharing a key, with up to five distinct example texts. */
 export interface AnalyticsBucket {
   key: string;
   count: number;
@@ -47,13 +54,19 @@ export interface CompanyBrainAnalyticsReport {
   health: Pick<CompanyBrainHealthReport, "counts">;
 }
 
+/** Loads up to `limit` meetings, decisions, and action items (each) from the store and analyzes them. */
 export function getCompanyBrainAnalytics(limit = 100_000): CompanyBrainAnalyticsReport {
-  const meetings = paged((offset) => listMeetingRecords({ limit: 1000, offset }), limit);
-  const decisions = paged((offset) => listDecisions(5000, offset), limit);
-  const actions = paged((offset) => listActionItems(5000, offset), limit);
+  const meetings = paged((offset, pageSize) => listMeetingRecords({ limit: pageSize, offset }), limit, 1000);
+  const decisions = paged((offset, pageSize) => listDecisions(pageSize, offset), limit, 5000);
+  const actions = paged((offset, pageSize) => listActionItems(pageSize, offset), limit, 5000);
   return buildCompanyBrainAnalytics({ meetings, decisions, actions });
 }
 
+/**
+ * Pure analysis over the given records: open-action load per owner, the top 25
+ * meeting-title/decision/action themes, meetings per day (top 60 days by count),
+ * quality ratios, and the health report's counts.
+ */
 export function buildCompanyBrainAnalytics(input: {
   meetings: MeetingRecord[];
   decisions: DecisionRecord[];
@@ -110,6 +123,7 @@ function summarizeOwners(actions: ActionItemRecord[]): OwnerAnalytics[] {
     .sort((a, b) => b.openActions - a.openActions || a.owner.localeCompare(b.owner));
 }
 
+/** Groups values by theme key (or by the raw value with `preserveShortKeys`); largest buckets first. */
 function bucketText(values: string[], limit: number, options: { preserveShortKeys?: boolean } = {}): AnalyticsBucket[] {
   const buckets = new Map<string, string[]>();
   for (const value of values) {
@@ -155,17 +169,4 @@ function ratio(numerator: number, denominator: number): number {
 
 function unique(values: string[]): string[] {
   return [...new Set(values)];
-}
-
-function paged<T>(readPage: (offset: number) => T[], limit: number): T[] {
-  const out: T[] = [];
-  let offset = 0;
-  while (out.length < limit) {
-    const page = readPage(offset);
-    if (page.length === 0) break;
-    out.push(...page.slice(0, limit - out.length));
-    offset += page.length;
-    if (page.length < 1000) break;
-  }
-  return out;
 }

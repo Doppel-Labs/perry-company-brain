@@ -1,11 +1,25 @@
-// issues — split out of the former monolithic meeting-store.ts
+// issues — shared work items, their append-only event history, and ownership pivots.
+//
+// Issues are projected from meeting action items and then edited by people.
+// Every human change appends issue_events rows (assigned, status_changed,
+// updated, commented), so the history survives later edits.
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { type IssueEventRecord, type IssueRecord, type PageOptions, type PivotRecord, type Row } from "./types";
-import { insertAudit, normalizePage, optionalString, statement, withBrainTransaction, withDb } from "./db";
+import { insertAudit, statement, withBrainTransaction, withDb } from "./database";
+import { normalizePage } from "./values";
 import { issueEventFromRow, issueFromRow, pivotFromRow } from "./rows";
 
+/**
+ * Creates or updates an issue, in one transaction. On an existing issue every
+ * omitted (undefined) field keeps its stored value, and an empty string clears
+ * a text field (project, description, owner, dueDate), matching the admin
+ * API's clearable fields. A new issue defaults to open/normal. With
+ * `preserveMutableFields`, an existing issue also keeps its status, priority,
+ * and owner even when they are given, so re-running the projection never
+ * clobbers someone's current work state. A new issue gets a `created` event;
+ * no audit row is written.
+ */
 export function upsertIssue(input: {
   id: string;
   project?: string;
@@ -22,15 +36,12 @@ export function upsertIssue(input: {
   const now = new Date().toISOString();
   return withDb((db) =>
     withBrainTransaction(() => {
-      const existing = statement(db, "SELECT * FROM issues WHERE id = ?").get(input.id) as Row | undefined;
-      const preservedExisting = existing && input.preserveMutableFields ? existing : undefined;
-      const status = preservedExisting
-        ? (String(preservedExisting.status) as IssueRecord["status"])
-        : input.status ?? (existing ? (String(existing.status) as IssueRecord["status"]) : "open");
-      const priority = preservedExisting
-        ? (String(preservedExisting.priority) as IssueRecord["priority"])
-        : input.priority ?? (existing ? (String(existing.priority) as IssueRecord["priority"]) : "normal");
-      const owner = preservedExisting ? optionalString(preservedExisting.owner) : input.owner;
+      const row = statement(db, "SELECT * FROM issues WHERE id = ?").get(input.id) as Row | undefined;
+      const existing = row ? issueFromRow(row) : undefined;
+      const preserve = Boolean(existing && input.preserveMutableFields);
+      const status = (preserve ? undefined : input.status) ?? existing?.status ?? "open";
+      const priority = (preserve ? undefined : input.priority) ?? existing?.priority ?? "normal";
+      const owner = keepOrClear(preserve ? undefined : input.owner, existing?.owner);
       statement(
         db,
         `INSERT INTO issues (
@@ -51,15 +62,15 @@ export function upsertIssue(input: {
           updated_at = excluded.updated_at`
       ).run(
         input.id,
-        input.project ?? null,
+        keepOrClear(input.project, existing?.project) ?? null,
         input.title,
-        input.description ?? null,
+        keepOrClear(input.description, existing?.description) ?? null,
         status,
         priority,
         owner ?? null,
-        input.sourceMeetingId ?? null,
-        input.sourceActionId ?? null,
-        input.dueDate ?? null,
+        input.sourceMeetingId ?? existing?.sourceMeetingId ?? null,
+        input.sourceActionId ?? existing?.sourceActionId ?? null,
+        keepOrClear(input.dueDate, existing?.dueDate) ?? null,
         now,
         now
       );
@@ -73,12 +84,23 @@ export function upsertIssue(input: {
           createdAt: now,
         });
       }
-      const row = statement(db, "SELECT * FROM issues WHERE id = ?").get(input.id) as Row;
-      return issueFromRow(row);
+      return issueFromRow(statement(db, "SELECT * FROM issues WHERE id = ?").get(input.id) as Row);
     })
   );
 }
 
+// Upsert semantics for a clearable text field: undefined keeps `current`, "" clears it.
+function keepOrClear(value: string | undefined, current: string | undefined): string | undefined {
+  if (value === undefined) return current;
+  return value === "" ? undefined : value;
+}
+
+/**
+ * Applies a partial human edit (omitted fields keep their value), appends one
+ * issue event per kind of change plus an optional comment, and writes an
+ * `issue.updated` audit row with before/after, in one transaction. Returns
+ * undefined if the issue does not exist.
+ */
 export function updateIssue(input: {
   id: string;
   project?: string;
@@ -138,6 +160,7 @@ export function updateIssue(input: {
   );
 }
 
+/** Most recently updated first, optionally filtered by owner, status, and project (default 100, max 100,000). */
 export function listIssues(options: PageOptions & { owner?: string; status?: IssueRecord["status"]; project?: string } = {}): IssueRecord[] {
   const { limit, offset } = normalizePage(options, 100, 100_000);
   const clauses: string[] = [];
@@ -162,6 +185,7 @@ export function listIssues(options: PageOptions & { owner?: string; status?: Iss
   );
 }
 
+/** An issue's history, oldest first (default 100, max 1000). */
 export function listIssueEvents(issueId: string, options: PageOptions = {}): IssueEventRecord[] {
   const { limit, offset } = normalizePage(options, 100, 1000);
   return withDb((db) =>
@@ -171,6 +195,7 @@ export function listIssueEvents(issueId: string, options: PageOptions = {}): Iss
   );
 }
 
+/** Inserts or updates an ownership pivot; on conflict the source ids and `createdAt` are kept. No audit row. */
 export function upsertPivot(input: Omit<PivotRecord, "createdAt"> & { createdAt?: string }): PivotRecord {
   const createdAt = input.createdAt ?? new Date().toISOString();
   return withDb((db) => {
@@ -285,6 +310,8 @@ function appendIssueMutationEvents(
   }
 }
 
+// INSERT OR IGNORE: events are immutable, and the deterministic `created` id
+// makes that event idempotent.
 function appendIssueEventInDb(
   db: DatabaseSync,
   event: {

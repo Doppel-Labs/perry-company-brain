@@ -2,7 +2,7 @@ const {
   drainGraphSyncJobs,
   getFullGraphSyncQueueSnapshot,
 } = require("../dist/graph/queue.js");
-const { searchGraphMemory } = require("../dist/graph/memory.js");
+const { searchGraphMemory } = require("../dist/graph/memory/index.js");
 const { replayGraphChangeSet } = require("../dist/graph/change-set-replay.js");
 const {
   countMeetingRecords,

@@ -41,6 +41,7 @@ test("Together extraction fails fast without an API key", async () => {
       extractMeetingSemanticsWithTogether(note, {
         apiKey: "",
         model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        timeoutMs: 60000,
         maxContextChars: 24000,
         temperature: 0,
       }),

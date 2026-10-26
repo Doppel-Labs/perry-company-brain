@@ -1,72 +1,60 @@
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+// http — composition root for the admin server: workers, router, static SPA, error boundary.
+import { createServer, type Server } from "node:http";
 import { startFtsWorker } from "@brain";
 import { startGraphSyncWorker } from "@graph";
 import { startIngestionWorker } from "@ingestion";
-import { sendJson, sendJsonBuffer, serveStatic } from "./http-util";
-import { authorizeApiRequest } from "./http-auth";
-import { handleGraphSync } from "./routes/graph-sync";
-import { handleIngestion } from "./routes/ingestion";
-import { handleContent } from "./routes/content";
-import { handleBrain } from "./routes/brain";
-import { handleApprovals } from "./routes/approvals";
-import { handleIssues } from "./routes/issues";
-import { handleSystem } from "./routes/system";
+import { adminHost, assertSafeBind } from "./auth";
+import { apiRoutes } from "./controllers";
+import { toHttpError } from "./http/errors";
+import { sendJson } from "./http/response";
+import { serveStatic } from "./http/static";
+import { Router } from "./router";
 
-const pingBody = Buffer.from('{"ok":true}');
+let workersStarted = false;
 
-let ftsWorkerStarted = false;
-
-let ingestionWorkerStarted = false;
-
-let graphSyncWorkerStarted = false;
-
-export function startAdminServer(port = Number(process.env.PORT ?? 8787)): void {
-  if (!ftsWorkerStarted) {
+/**
+ * Starts the background workers (FTS, ingestion, graph sync; once per process)
+ * and listens on PORT (default 8787) and ADMIN_HOST. Throws before binding a
+ * non-loopback host without ADMIN_API_TOKEN.
+ */
+export function startAdminServer(port = Number(process.env.PORT) || 8787, host = adminHost()): void {
+  assertSafeBind(host);
+  if (!workersStarted) {
     startFtsWorker();
-    ftsWorkerStarted = true;
-  }
-  if (!ingestionWorkerStarted) {
     startIngestionWorker();
-    ingestionWorkerStarted = true;
-  }
-  if (!graphSyncWorkerStarted) {
     startGraphSyncWorker();
-    graphSyncWorkerStarted = true;
+    workersStarted = true;
   }
 
-  const server = createAdminHttpServer();
-  const host = process.env.ADMIN_HOST || "127.0.0.1";
-  server.listen(port, host, () => {
-    console.log(`Perry admin server listening on http://${host}:${port}`);
+  createAdminHttpServer().listen(port, host, () => {
+    console.log(`Perry admin server listening on http://${host.includes(":") ? `[${host}]` : host}:${port}`);
   });
 }
 
-export function createAdminHttpServer(): Server {
+/**
+ * The request handler alone, with no workers or listen; /api goes to the router,
+ * everything else to the SPA. A request must arrive within 30 s and its headers
+ * within 10 s, so slow clients cannot hold connections open.
+ */
+export function createAdminHttpServer(router = new Router(apiRoutes)): Server {
   return createServer({ requestTimeout: 30_000, headersTimeout: 10_000 }, async (req, res) => {
     try {
-      if (req.method === "GET" && req.url === "/api/ping") {
-        sendJsonBuffer(res, 200, pingBody);
+      // The base is fixed: the Host header is client-controlled and must not shape routing.
+      const url = new URL(req.url ?? "/", "http://localhost");
+      if (url.pathname === "/api" || url.pathname.startsWith("/api/")) await router.dispatch(req, res, url);
+      else serveStatic(url.pathname, res);
+    } catch (error) {
+      const clientError = toHttpError(error);
+      if (!clientError) console.error(error);
+      if (res.headersSent) {
+        res.end();
         return;
       }
-      await route(req, res);
-    } catch (error) {
-      const status = typeof (error as { status?: unknown }).status === "number" ? (error as { status: number }).status : 500;
-      if (status >= 500) console.error(error);
-      if (status === 413) res.setHeader("connection", "close");
-      sendJson(res, status, { error: error instanceof Error ? error.message : "Internal server error" });
+      // Only deliberate HttpErrors reach the client; internals stay in the server log.
+      // An oversized body may still be streaming, so drop the connection after the 413.
+      if (clientError?.status === 413) res.setHeader("connection", "close");
+      if (clientError) sendJson(res, clientError.status, { error: clientError.message });
+      else sendJson(res, 500, { error: "Internal server error" });
     }
   });
-}
-
-async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-  authorizeApiRequest(req, url.pathname);
-  if (await handleGraphSync(req, res, url)) return;
-  if (await handleIngestion(req, res, url)) return;
-  if (await handleContent(req, res, url)) return;
-  if (await handleBrain(req, res, url)) return;
-  if (await handleApprovals(req, res, url)) return;
-  if (await handleIssues(req, res, url)) return;
-  if (await handleSystem(req, res, url)) return;
-  serveStatic(url.pathname, res);
 }

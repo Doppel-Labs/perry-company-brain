@@ -1,7 +1,10 @@
-// rows — split out of the former monolithic meeting-store.ts
+// rows — pure mappers from raw SQLite rows (snake_case columns) to the typed records in types.ts.
+//
+// Mappers trust the schema: enum columns are cast without validation, and
+// empty or NULL optional text columns become undefined.
 import { type MeetingNote } from "@meetings";
 import { type ActionItemRecord, type ApprovalRecord, type ApprovalSummaryRecord, type DecisionRecord, type GraphChangeSetRecord, type GraphSyncJobRecord, type IngestionJobRecord, type IssueEventRecord, type IssueRecord, type MeetingRecord, type PivotRecord, type Row, type UserRecord } from "./types";
-import { optionalString } from "./db";
+import { optionalString } from "./values";
 
 export function meetingFromRow(row: Row): MeetingRecord {
   return {
@@ -86,6 +89,7 @@ export function issueEventFromRow(row: Row): IssueEventRecord {
   };
 }
 
+/** Throws if `affected_issue_ids_json` is not valid JSON. */
 export function pivotFromRow(row: Row): PivotRecord {
   return {
     id: String(row.id),
@@ -146,6 +150,7 @@ export function ingestionJobFromRow(row: Row): IngestionJobRecord {
     maxAttempts: Number(row.max_attempts),
     notBefore: String(row.not_before),
     lockedAt: optionalString(row.locked_at),
+    leaseToken: optionalString(row.lease_token),
     lastError: optionalString(row.last_error),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
@@ -164,6 +169,7 @@ export function graphSyncJobFromRow(row: Row): GraphSyncJobRecord {
     maxAttempts: Number(row.max_attempts),
     notBefore: String(row.not_before),
     lockedAt: optionalString(row.locked_at),
+    leaseToken: optionalString(row.lease_token),
     lastError: optionalString(row.last_error),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
