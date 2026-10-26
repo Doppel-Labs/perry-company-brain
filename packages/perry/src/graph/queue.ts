@@ -1,10 +1,20 @@
+// queue — the graph sync queue: meeting episodes waiting to be posted to the bridge.
+//
+// Durability, claiming and retry backoff live in the store's shared job-queue
+// engine (graph_sync_jobs); this file decides what goes into a job and how a
+// claimed job is delivered. One job per meeting: re-enqueueing resets it.
+// A change set that fails validation is stored for review but never posted,
+// in either write mode: its job is written as failed, and drain skips any
+// invalid job that was queued before that rule existed.
 import {
   claimGraphSyncJobs,
   completeGraphSyncJob,
   enqueueGraphSyncJob,
   failGraphSyncJob,
   getGraphSyncQueueStats,
+  invalidChangeSetReason,
   listGraphSyncJobs,
+  skipInvalidGraphSyncJob,
   type GraphSyncJobRecord,
   type GraphSyncQueueStats,
   type PageOptions,
@@ -22,11 +32,19 @@ export interface GraphSyncQueueSnapshot {
   recent: GraphSyncJobSummary[];
 }
 
+/** A job row without its payload and result JSON, for listings. */
 export type GraphSyncJobSummary = Omit<GraphSyncJobRecord, "payloadJson" | "resultJson"> & {
   hasPayload: boolean;
   hasResult: boolean;
 };
 
+/**
+ * Builds the meeting's episode (with its change set and validation) and queues
+ * it as job `graph-sync:meeting:<id>`, storing the change set in the same
+ * transaction. An invalid change set is stored as `invalid` and its job is
+ * written as `failed` rather than queued, so it is never posted or
+ * materialized. Returns undefined, writing nothing, when graph memory is disabled.
+ */
 export function enqueueMeetingGraphSync(input: GraphMemorySyncInput): GraphSyncJobRecord | undefined {
   const status = getGraphMemoryStatus();
   if (!status.enabled) return undefined;
@@ -53,6 +71,13 @@ export function enqueueMeetingGraphSync(input: GraphMemorySyncInput): GraphSyncJ
   });
 }
 
+/**
+ * Claims and posts up to `limit` due jobs, re-claiming until the limit is met or
+ * none are due. A failed post is recorded on the job (retried with backoff
+ * until max attempts) rather than thrown. `skipped` counts claimed jobs whose
+ * change set failed validation: they are retired as failed without being
+ * posted. A no-op when graph memory is disabled.
+ */
 export async function drainGraphSyncJobs(limit = 10): Promise<{ processed: number; failed: number; skipped: number }> {
   const status = getGraphMemoryStatus();
   if (!status.enabled) return { processed: 0, failed: 0, skipped: 0 };
@@ -69,6 +94,12 @@ export async function drainGraphSyncJobs(limit = 10): Promise<{ processed: numbe
     for (const job of jobs) {
       try {
         const payload = JSON.parse(job.payloadJson) as GraphitiEpisodePayload;
+        const validationErrors = invalidPayloadErrors(payload);
+        if (validationErrors) {
+          skipInvalidGraphSyncJob(job.id, invalidChangeSetReason(validationErrors));
+          skipped += 1;
+          continue;
+        }
         await postGraphitiEpisode(payload, status);
         completeGraphSyncJob(job.id, { posted: true, name: payload.name, groupId: payload.groupId });
         processed += 1;
@@ -82,6 +113,7 @@ export async function drainGraphSyncJobs(limit = 10): Promise<{ processed: numbe
   return { processed, failed, skipped };
 }
 
+/** Queue counts plus a page of recent jobs, without payloads. */
 export function getGraphSyncQueueSnapshot(options: PageOptions = {}): GraphSyncQueueSnapshot {
   return {
     stats: getGraphSyncQueueStats(),
@@ -89,6 +121,7 @@ export function getGraphSyncQueueSnapshot(options: PageOptions = {}): GraphSyncQ
   };
 }
 
+/** Like getGraphSyncQueueSnapshot, but the jobs include their payload and result JSON. */
 export function getFullGraphSyncQueueSnapshot(options: PageOptions = {}): {
   stats: GraphSyncQueueStats;
   recent: GraphSyncJobRecord[];
@@ -97,6 +130,12 @@ export function getFullGraphSyncQueueSnapshot(options: PageOptions = {}): {
     stats: getGraphSyncQueueStats(),
     recent: listGraphSyncJobs(options),
   };
+}
+
+// The episode's recorded validation errors when its change set is invalid, else undefined.
+function invalidPayloadErrors(payload: GraphitiEpisodePayload): unknown[] | undefined {
+  const body = JSON.parse(payload.body) as { graphValidation?: { valid?: boolean; errors?: unknown[] } };
+  return body.graphValidation?.valid === false ? body.graphValidation.errors ?? [] : undefined;
 }
 
 function summarizeJob(job: GraphSyncJobRecord): GraphSyncJobSummary {

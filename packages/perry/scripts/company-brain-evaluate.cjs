@@ -11,7 +11,7 @@ const {
   drainGraphSyncJobs,
   getFullGraphSyncQueueSnapshot,
 } = require("../dist/graph/queue.js");
-const { searchGraphMemory } = require("../dist/graph/memory.js");
+const { searchGraphMemory } = require("../dist/graph/memory/index.js");
 const { processGranolaZapierPayload } = require("../dist/ingestion/workflow.js");
 
 const args = parseArgs(process.argv.slice(2));

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildGraphChangeSet, validateGraphChangeSet } from "@graph";
+import { buildGraphChangeSet, graphPrivacySourcesFor, validateGraphChangeSet } from "@graph";
 import { buildGraphitiMeetingEpisode, type GraphMemorySyncInput } from "@graph";
 
 test("builds a typed graph change set with bounded evidence instead of raw transcript context", () => {
@@ -29,7 +29,7 @@ test("builds a typed graph change set with bounded evidence instead of raw trans
 test("represents ownership pivots as explicit relation assertions and retirements", () => {
   const changeSet = buildGraphChangeSet(
     sampleInput({
-      decisions: [{ text: "Ada now owns Wallace onboarding; Ben is the fallback reviewer." }],
+      decisions: [{ text: "Ada now owns Wallace onboarding, taking over from Ben; Cy is the fallback reviewer." }],
       actionItems: [],
     })
   );
@@ -50,7 +50,7 @@ test("represents ownership pivots as explicit relation assertions and retirement
       (relation) =>
         relation.subjectKey === "project:wallace" &&
         relation.relation === "HAS_FALLBACK_REVIEWER" &&
-        relation.objectKey === "person:ben"
+        relation.objectKey === "person:cy"
     ),
     true
   );
@@ -63,6 +63,25 @@ test("represents ownership pivots as explicit relation assertions and retirement
     ),
     true
   );
+});
+
+test("a plain fallback reviewer is not a previous owner, so nothing is retired", () => {
+  const changeSet = buildGraphChangeSet(
+    sampleInput({
+      decisions: [{ text: "Ada now owns Wallace onboarding; Ben is the fallback reviewer." }],
+      actionItems: [],
+    })
+  );
+
+  assert.equal(validateGraphChangeSet(changeSet).valid, true);
+  assert.equal(
+    changeSet.relations.some(
+      (relation) =>
+        relation.subjectKey === "project:wallace" && relation.relation === "HAS_FALLBACK_REVIEWER" && relation.objectKey === "person:ben"
+    ),
+    true
+  );
+  assert.deepEqual(changeSet.retirements, []);
 });
 
 test("deduplicates entities while preserving multiple evidence-backed relations", () => {
@@ -172,6 +191,114 @@ test("Graphiti meeting episodes carry graph operations and validation metadata",
     if (previousTranscript === undefined) delete process.env.PERRY_GRAPHITI_INCLUDE_TRANSCRIPT;
     else process.env.PERRY_GRAPHITI_INCLUDE_TRANSCRIPT = previousTranscript;
   }
+});
+
+test("keeps only specific operating mentions: names, numbers, identifiers, or three content words", () => {
+  const changeSet = buildGraphChangeSet(
+    sampleInput({
+      summaryMarkdown: [
+        "Goal: make it better.",
+        "Goal: Improve things.",
+        "Risk: things slip.",
+        "Blocker: follow-up.",
+        "Our goal is to ship it soon.",
+        "Goal: reduce search p95 below 20 ms.",
+        "Risk: Graphiti bridge outage during sync.",
+        "Blocker: missing Notion permissions.",
+        "Feature: adaptive search retries.",
+        "Capability: SOC2 evidence export.",
+      ].join("\n"),
+      decisions: [],
+      actionItems: [],
+    })
+  );
+  const keys = changeSet.entities.map((entity) => entity.stableKey);
+
+  for (const vague of ["goal:make-it-better", "goal:improve-things", "risk:things-slip", "blocker:follow-up", "goal:ship-it-soon"]) {
+    assert.equal(keys.includes(vague), false, `${vague} should not become an entity`);
+  }
+  for (const specific of [
+    "goal:reduce-search-p95-below-20-ms",
+    "risk:graphiti-bridge-outage-during-sync",
+    "blocker:missing-notion-permissions",
+    "feature:adaptive-search-retries",
+    "capability:soc2-evidence-export",
+  ]) {
+    assert.equal(keys.includes(specific), true, `${specific} should become an entity`);
+  }
+});
+
+test("a decision that merely mentions the transcript is not a privacy violation", () => {
+  const input = sampleInput({
+    decisions: [{ text: "Keep the Granola transcript out of Notion; private notes stay with the operator." }],
+    actionItems: [{ owner: "Ada", text: "Delete the transcript export once the summary is approved." }],
+  });
+  const episode = buildGraphitiMeetingEpisode(input, "doppel-test");
+  const body = JSON.parse(episode.body) as { graphValidation: { valid: boolean; errors: string[] } };
+
+  assert.deepEqual(body.graphValidation.errors, []);
+  assert.equal(body.graphValidation.valid, true);
+});
+
+test("evidence quoting the private transcript or notes invalidates the change set", () => {
+  const input = sampleInput({
+    transcript: "Ben said the Acme renewal is at risk because their CFO is leaving in March, keep this quiet.",
+    privateNotes: "Ada thinks Wallace pricing should double next quarter without telling the team",
+  });
+  const privacy = graphPrivacySourcesFor(input);
+  const changeSet = buildGraphChangeSet(input);
+  assert.equal(validateGraphChangeSet(changeSet, privacy).valid, true);
+
+  const leaked = {
+    ...changeSet,
+    evidence: changeSet.evidence.map((item) =>
+      item.evidenceId === "evidence:meeting:granola:graph-object-1"
+        ? { ...item, excerpt: `${item.excerpt} Note: the Acme renewal is at risk because their CFO is leaving in March.` }
+        : item.evidenceId === "evidence:decision:granola:graph-object-1:1"
+          ? { ...item, excerpt: "Ada thinks Wallace pricing should double next quarter." }
+          : item
+    ),
+  };
+  const validation = validateGraphChangeSet(leaked, privacy);
+
+  assert.equal(validation.valid, false);
+  assert.deepEqual(validation.errors, [
+    "Graph evidence contains private notes or transcript content: evidence:meeting:granola:graph-object-1, evidence:decision:granola:graph-object-1:1",
+  ]);
+});
+
+test("private-note text that extraction published as a decision is not a leak", () => {
+  // Extraction reads private notes, so a decision can repeat them verbatim; that text is published anyway.
+  const input = sampleInput({
+    privateNotes: "Decision: Ada now owns Wallace onboarding and Ben reviews the launch checklist.",
+    decisions: [{ text: "Ada now owns Wallace onboarding and Ben reviews the launch checklist." }],
+  });
+  const validation = validateGraphChangeSet(buildGraphChangeSet(input), graphPrivacySourcesFor(input));
+
+  assert.deepEqual(validation.errors, []);
+});
+
+test("model-extracted repositories, customers, and policies become meeting mentions", () => {
+  const input = sampleInput({
+    summaryMarkdown: "Northwind wants the doppel-labs/perry-discord-bot repo fixed. Decisions:\n- Ada now owns Wallace onboarding.",
+  });
+  input.knowledge.entities = [
+    { type: "customer", name: "Northwind" },
+    { type: "repository", name: "doppel-labs/perry-discord-bot" },
+    { type: "project", name: "Wallace" },
+  ];
+  const changeSet = buildGraphChangeSet(input);
+  const meetingKey = "meeting:granola:graph-object-1";
+  const mentions = (relation: string, objectKey: string) =>
+    changeSet.relations.filter((item) => item.subjectKey === meetingKey && item.relation === relation && item.objectKey === objectKey);
+
+  assert.equal(validateGraphChangeSet(changeSet).valid, true);
+  assert.equal(mentions("MENTIONS_CUSTOMER", "customer:northwind").length, 1);
+  // The regex extractor also finds owner/repo; both paths merge into one entity and one relation.
+  assert.equal(changeSet.entities.filter((entity) => entity.stableKey === "repository:doppel-labs-perry-discord-bot").length, 1);
+  assert.equal(mentions("MENTIONS_REPOSITORY", "repository:doppel-labs-perry-discord-bot").length, 1);
+  // Projects come from routing, not from model mentions.
+  assert.equal(changeSet.relations.some((item) => item.relation === "MENTIONS_CUSTOMER" && item.objectKey.startsWith("project:")), false);
 });
 
 function sampleInput(overrides: Partial<GraphMemorySyncInput["note"] & GraphMemorySyncInput["knowledge"]> = {}): GraphMemorySyncInput {
