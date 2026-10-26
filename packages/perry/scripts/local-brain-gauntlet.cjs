@@ -7,11 +7,11 @@ const adminToken = process.env.ADMIN_API_TOKEN;
 async function main() {
   const checks = [];
   checks.push(await checkJson("admin ping", `${adminUrl}/api/ping`));
-  checks.push(await checkJson("admin health", `${adminUrl}/api/health`));
-  checks.push(await checkJson("admin diagnostics", `${adminUrl}/api/diagnostics`));
-  checks.push(await checkJson("admin agent status", `${adminUrl}/api/agent/status`));
-  checks.push(await checkJson("admin graph change sets", `${adminUrl}/api/graph-sync/change-sets?limit=1`));
-  checks.push(await checkJson("admin graph entities", `${adminUrl}/api/brain/graph/entities?q=wallace&limit=1`));
+  checks.push(await checkJson("admin health", `${adminUrl}/api/health`, { headers: adminHeaders() }));
+  checks.push(await checkJson("admin diagnostics", `${adminUrl}/api/diagnostics`, { headers: adminHeaders() }));
+  checks.push(await checkJson("admin agent status", `${adminUrl}/api/agent/status`, { headers: adminHeaders() }));
+  checks.push(await checkJson("admin graph change sets", `${adminUrl}/api/graph-sync/change-sets?limit=1`, { headers: adminHeaders() }));
+  checks.push(await checkJson("admin graph entities", `${adminUrl}/api/brain/graph/entities?q=wallace&limit=1`, { headers: adminHeaders() }));
 
   const replayChangeSetId = process.env.PERRY_GAUNTLET_REPLAY_CHANGE_SET_ID;
   if (replayChangeSetId) {
@@ -47,12 +47,10 @@ function adminHeaders() {
 }
 
 async function checkJson(name, url, options = {}) {
-  // Every admin route except /api/ping requires the token, so admin checks always carry it.
-  const auth = url.startsWith(adminUrl) ? adminHeaders() : {};
-  const headers = { accept: "application/json", ...auth, ...(options.headers ?? {}) };
+  const headers = { accept: "application/json", ...(options.headers ?? {}) };
   try {
     const started = performance.now();
-    const response = await fetch(url, { method: options.method ?? "GET", headers });
+    const response = await fetch(url, { method: options.method ?? "GET", headers, redirect: "error" });
     const elapsed = performance.now() - started;
     const text = await response.text();
     if (!response.ok) return { name, ok: false, detail: `${response.status} in ${elapsed.toFixed(1)}ms ${text.slice(0, 120)}` };
