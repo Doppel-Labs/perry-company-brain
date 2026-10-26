@@ -69,16 +69,25 @@ export class Router {
    * route table is not enumerable anonymously.
    */
   async dispatch(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+    const found = this.find(req.method ?? "GET", url.pathname);
+    authorize(req, found?.route.access ?? "admin");
+    if (!found) throw notFound(`No route for ${req.method} ${url.pathname}`);
+    const { route, match } = found;
+    const params = Object.fromEntries(route.keys.map((key, index) => [key, decodeSegment(match[index + 1])]));
+    sendResult(res, await route.handle({ req, res, url, params, query: new Query(url.searchParams) }));
+  }
+
+  /** The access level a request needs: its route's, or "admin" for an unknown method or path. */
+  accessFor(method: string, pathname: string): Access {
+    return this.find(method, pathname)?.route.access ?? "admin";
+  }
+
+  private find(method: string, pathname: string): { route: CompiledRoute; match: RegExpExecArray } | undefined {
     for (const route of this.routes) {
-      const match = route.pattern.exec(url.pathname);
-      if (!match || !route.methods.has(req.method ?? "GET")) continue;
-      authorize(req, route.access);
-      const params = Object.fromEntries(route.keys.map((key, index) => [key, decodeSegment(match[index + 1])]));
-      sendResult(res, await route.handle({ req, res, url, params, query: new Query(url.searchParams) }));
-      return;
+      const match = route.pattern.exec(pathname);
+      if (match && route.methods.has(method)) return { route, match };
     }
-    authorize(req, "admin");
-    throw notFound(`No route for ${req.method} ${url.pathname}`);
+    return undefined;
   }
 }
 

@@ -43,7 +43,7 @@ pnpm build
 pnpm perry start              # or: pnpm perry start:server
 ```
 
-When the admin UI opens, it shows a Connect screen. Paste your `ADMIN_API_TOKEN` there. The UI keeps it in `sessionStorage` for that tab only. If you have not set a token, the API only answers requests from the same machine; see [Security](#security).
+When the admin UI opens, it shows a Connect screen. Paste your `ADMIN_API_TOKEN` there; `pnpm bootstrap` generated one in `packages/perry/.env`. The UI keeps it in memory for that page only. Without a configured token the API answers `503` rather than running unauthenticated; see [Security](#security).
 
 ### Loading the environment
 
@@ -120,7 +120,7 @@ Precedence is the same for every editable setting: **environment variables are d
 |---|---|---|
 | `PORT` | `8787` | Admin server port. |
 | `ADMIN_HOST` | `127.0.0.1` | Bind address. A non-loopback address refuses to start without `ADMIN_API_TOKEN`. |
-| `ADMIN_API_TOKEN` | none | Required on every `/api` route except `/api/ping` and the Granola webhook. Unset means same-machine requests only. |
+| `ADMIN_API_TOKEN` | none (`pnpm bootstrap` generates one) | Required on every `/api` route except `/api/ping` and the Granola webhook. Unset means those routes answer `503`. |
 | `PERRY_MAX_BODY_BYTES` | `2097152` (2 MiB) | Largest accepted JSON request body. |
 | `PERRY_ADMIN_SERVER` | on | `false` runs the bot without the admin server (and without the background workers). |
 | `PERRY_CONFIG_PATH` | `data/perry.config.json` | Settings file location. |
@@ -129,7 +129,7 @@ Precedence is the same for every editable setting: **environment variables are d
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `GRANOLA_WEBHOOK_TOKEN` | none | Shared secret Zapier sends in `x-perry-webhook-token`. Unset means the webhook accepts same-machine requests only. |
+| `GRANOLA_WEBHOOK_TOKEN` | none (`pnpm bootstrap` generates one) | Shared secret Zapier sends in `x-perry-webhook-token`. Unset means the webhook answers `503`. |
 | `PERRY_WEBHOOK_MODE` | `inline` | `queue` makes every webhook call enqueue a job and return immediately. |
 | `PERRY_INGESTION_WORKER` | `false` | `true` drains the ingestion queue continuously. |
 | `PERRY_INGESTION_INTERVAL_MS` | `1000` | Ingestion worker polling interval. |
@@ -270,11 +270,11 @@ Create a Discord application with a bot user, and install it with the `bot` and 
 
 ## Security
 
-The admin server fails closed. Every `/api` route requires `ADMIN_API_TOKEN`, sent as `Authorization: Bearer <token>` or `x-admin-token: <token>`, with two exceptions: `GET /api/ping` is public, and the Granola webhook requires `GRANOLA_WEBHOOK_TOKEN` instead. Without a token, Perry only answers genuine same-machine requests, and it refuses to bind to a non-loopback address. The full policy, and guidance for Discord, Notion, and graph data, is in [security-privacy.md](docs/security-privacy.md).
+The admin server fails closed. Every `/api` route requires `ADMIN_API_TOKEN`, sent as `Authorization: Bearer <token>` or `x-admin-token: <token>`, with two exceptions: `GET /api/ping` is public, and the Granola webhook requires `GRANOLA_WEBHOOK_TOKEN` instead. An unset token disables what it protects (`503`) rather than disabling authentication, and Perry refuses to bind to a non-loopback address without `ADMIN_API_TOKEN`. The full policy, and guidance for Discord, Notion, and graph data, is in [security-privacy.md](docs/security-privacy.md).
 
 ## Admin API reference
 
-Access levels: **admin** requires `ADMIN_API_TOKEN` (or a same-machine request when no token is set), **public** requires nothing, and **webhook** requires `GRANOLA_WEBHOOK_TOKEN`. List endpoints accept `limit` (capped at 1000) and `offset` unless noted. The source of truth is `src/server/controllers/`.
+Access levels: **admin** requires `ADMIN_API_TOKEN`, **public** requires nothing, and **webhook** requires `GRANOLA_WEBHOOK_TOKEN`. An unset token makes its routes answer `503`. List endpoints accept `limit` (capped at 1000) and `offset` unless noted. The source of truth is `src/server/controllers/`.
 
 **System** (`controllers/system.ts`)
 

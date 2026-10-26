@@ -26,8 +26,8 @@ export function ConnectScreen({
             onConnect();
           }}
         >
-          {/* A 401 is detected from the message text: ApiError formats it as "<label> failed: 401". */}
-          <span>{error.includes(": 401") ? "Enter the admin API token to connect to Perry." : error}</span>
+          {/* Statuses are detected from the message text: ApiError formats it as "<label> failed: <status>". */}
+          <span>{connectMessage(error)}</span>
           <input
             aria-label="Admin API token"
             className="token-input"
@@ -51,4 +51,11 @@ export function ConnectScreen({
       </div>
     </main>
   );
+}
+
+/** 401: the token is missing or wrong. 503: the server has no ADMIN_API_TOKEN, so no token can work yet. */
+function connectMessage(error: string): string {
+  if (error.includes(": 401")) return "Enter the admin API token to connect to Perry.";
+  if (error.includes(": 503")) return "The server has no ADMIN_API_TOKEN configured. Set it (pnpm bootstrap generates one), restart Perry, then connect.";
+  return error;
 }

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createAdminHttpServer } from "@server";
+import { createAdminHttpServer } from "../src/server/http";
 import { enqueueMeetingGraphSync } from "@graph";
 import { closeBrainStore } from "@store";
 
@@ -129,6 +129,14 @@ test("admin graph APIs expose sanitized change sets and bounded graph reads", as
   const baseUrl = `http://127.0.0.1:${adminAddress.port}`;
 
   try {
+    for (const path of ["/api/config", "/api/meetings/history", "/api/brain/search?q=private", "/api/approvals"]) {
+      const response = await fetch(`${baseUrl}${path}`);
+      assert.equal(response.status, 401, `${path} must require authentication`);
+    }
+    delete process.env.ADMIN_API_TOKEN;
+    assert.equal((await fetch(`${baseUrl}/api/config`)).status, 503);
+    process.env.ADMIN_API_TOKEN = "admin-graph-test-token";
+
     const job = enqueueMeetingGraphSync({
       note: {
         source: "granola",
@@ -299,9 +307,3 @@ async function getJson<T>(url: string, init?: RequestInit): Promise<T> {
   }
   return (await response.json()) as T;
 }
-
-
-
-
-
-

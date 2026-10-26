@@ -31,9 +31,13 @@ export function startAdminServer(port = Number(process.env.PORT) || 8787, host =
   });
 }
 
-/** The request handler alone, with no workers or listen; /api goes to the router, everything else to the SPA. */
+/**
+ * The request handler alone, with no workers or listen; /api goes to the router,
+ * everything else to the SPA. A request must arrive within 30 s and its headers
+ * within 10 s, so slow clients cannot hold connections open.
+ */
 export function createAdminHttpServer(router = new Router(apiRoutes)): Server {
-  return createServer(async (req, res) => {
+  return createServer({ requestTimeout: 30_000, headersTimeout: 10_000 }, async (req, res) => {
     try {
       // The base is fixed: the Host header is client-controlled and must not shape routing.
       const url = new URL(req.url ?? "/", "http://localhost");
@@ -46,7 +50,9 @@ export function createAdminHttpServer(router = new Router(apiRoutes)): Server {
         res.end();
         return;
       }
-      // Only deliberate 4xx messages reach the client; internals stay in the server log.
+      // Only deliberate HttpErrors reach the client; internals stay in the server log.
+      // An oversized body may still be streaming, so drop the connection after the 413.
+      if (clientError?.status === 413) res.setHeader("connection", "close");
       if (clientError) sendJson(res, clientError.status, { error: clientError.message });
       else sendJson(res, 500, { error: "Internal server error" });
     }

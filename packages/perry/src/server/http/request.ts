@@ -2,27 +2,37 @@
 import type { IncomingMessage } from "node:http";
 import { badRequest, httpError } from "./errors";
 
-/** Upper bound on a JSON request body; larger bodies are rejected with 413. */
-export const maxJsonBodyBytes = Number(process.env.PERRY_MAX_BODY_BYTES || 2 * 1024 * 1024);
+/** Upper bound on a JSON request body (PERRY_MAX_BODY_BYTES, default 2 MiB); larger bodies are rejected with 413. */
+export const maxJsonBodyBytes = positiveInt(process.env.PERRY_MAX_BODY_BYTES, 2 * 1024 * 1024);
 
 /** Hard ceiling for any numeric limit a client can request. */
 const defaultMaxLimit = 10_000;
 const maxPageLimit = 1000;
 
-/** Reads and parses the body; an empty body is `{}`. Throws 413 past maxJsonBodyBytes, 400 on invalid JSON. */
+/**
+ * Reads and parses the body; an empty body is `{}`. A Content-Length over the
+ * limit is rejected before any byte is read, and streamed bytes are counted
+ * too, so chunked or understated bodies cannot exceed it. Throws 413 past
+ * maxJsonBodyBytes and 400 on an invalid Content-Length or invalid JSON.
+ */
 export async function readJson(req: IncomingMessage): Promise<unknown> {
+  const length = req.headers["content-length"];
+  if (length !== undefined) {
+    if (!/^\d+$/u.test(length)) throw badRequest("Invalid Content-Length.");
+    if (Number(length) > maxJsonBodyBytes) throw httpError(413, "Request body too large.");
+  }
+
   const chunks: Buffer[] = [];
   let size = 0;
-  for await (const chunk of req) {
+  // destroyOnReturn: false keeps the socket open so the client receives the 413
+  // (the error boundary then closes the connection) instead of a reset.
+  for await (const chunk of req.iterator({ destroyOnReturn: false })) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += buffer.length;
-    if (size > maxJsonBodyBytes) {
-      req.destroy();
-      throw httpError(413, "Request body too large.");
-    }
+    if (size > maxJsonBodyBytes) throw httpError(413, "Request body too large.");
     chunks.push(buffer);
   }
-  const raw = Buffer.concat(chunks).toString("utf8");
+  const raw = Buffer.concat(chunks, size).toString("utf8");
   if (!raw) return {};
   try {
     return JSON.parse(raw);
@@ -77,4 +87,9 @@ export class Query {
       offset: this.int("offset", 0, { max: Number.MAX_SAFE_INTEGER }),
     };
   }
+}
+
+function positiveInt(raw: string | undefined, fallback: number): number {
+  const value = Math.trunc(Number(raw));
+  return raw?.trim() && Number.isFinite(value) && value > 0 ? value : fallback;
 }
