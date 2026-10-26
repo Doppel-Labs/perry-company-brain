@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { hasBrainCommandAccess, slashCommandData } from "@discord";
 import { formatOntologyChangedSince, formatOntologyEvidence, formatOntologyState } from "@brain";
 import { enqueueMeetingGraphSync } from "@graph";
-import { closeBrainStore } from "@store";
+import { formatMyActions } from "@discord/brain-commands";
+import { closeBrainStore, insertBackfillMeeting } from "@store";
 import type { GraphMemorySyncInput } from "@graph";
 
 test("registers bounded Perry brain slash commands", () => {
@@ -20,7 +21,8 @@ test("registers bounded Perry brain slash commands", () => {
 });
 
 test("allows brain commands only for configured admin roles", () => {
-  assert.equal(hasBrainCommandAccess({ roleIds: [], adminRoleIds: [] }), true);
+  assert.equal(hasBrainCommandAccess({ roleIds: [], adminRoleIds: [] }), false);
+  assert.equal(hasBrainCommandAccess({ roleIds: ["engineering"], adminRoleIds: [] }), false);
   assert.equal(hasBrainCommandAccess({ roleIds: ["engineering"], adminRoleIds: ["brain-admin"] }), false);
   assert.equal(hasBrainCommandAccess({ roleIds: ["brain-admin", "engineering"], adminRoleIds: ["brain-admin"] }), true);
 });
@@ -107,3 +109,53 @@ function preserveEnv(keys: string[]): { restore(): void } {
     },
   };
 }
+
+test("/brain my-actions finds every open action owned by the caller's roster names, exactly", () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "perry-discord-my-actions-"));
+  const env = preserveEnv(["PERRY_DB_PATH", "PERRY_CONFIG_PATH"]);
+  process.env.PERRY_DB_PATH = join(tempDir, "perry.sqlite");
+  process.env.PERRY_CONFIG_PATH = join(tempDir, "perry.config.json");
+  writeFileSync(
+    process.env.PERRY_CONFIG_PATH,
+    JSON.stringify({ roster: [{ name: "Ada Lovelace", discordUserId: "discord-ada", notionName: "Ada L" }] })
+  );
+
+  try {
+    const meeting = (id: string, createdAt: string) => ({
+      id,
+      source: "granola" as const,
+      sourceId: id,
+      title: id,
+      createdAt,
+      updatedAt: createdAt,
+      status: "processed" as const,
+    });
+    // Ada's actions are older than 60 newer actions, so a scan of recent rows misses them.
+    insertBackfillMeeting(meeting("older", "2026-01-01T10:00:00.000Z"), {
+      decisions: [],
+      actionItems: [
+        { owner: "Ada Lovelace", text: "Draft the Wallace launch plan." },
+        { owner: "ada l", text: "Review the Notion wiki schema." },
+        { owner: "Adam", text: "Not Ada's: a substring match would claim it." },
+      ],
+    });
+    insertBackfillMeeting(meeting("newer", "2026-05-01T10:00:00.000Z"), {
+      decisions: [],
+      actionItems: Array.from({ length: 60 }, (_, index) => ({ owner: "Ben", text: `Ben task ${index}` })),
+    });
+
+    const reply = formatMyActions({ id: "discord-ada", username: "ada_l", globalName: "Ada" });
+    assert.match(reply, /^Open actions for Ada Lovelace:/u);
+    assert.match(reply, /Draft the Wallace launch plan/u);
+    assert.match(reply, /Review the Notion wiki schema/u);
+    assert.doesNotMatch(reply, /Not Ada's/u);
+
+    // Off the roster: the caller's own Discord names, matched exactly.
+    assert.equal(formatMyActions({ id: "discord-unknown", username: "ad", globalName: "Ada" }), "No open actions found for Ada.");
+    assert.match(formatMyActions({ id: "discord-adam", username: "adam" }), /Not Ada's/u);
+  } finally {
+    closeBrainStore(process.env.PERRY_DB_PATH);
+    env.restore();
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});

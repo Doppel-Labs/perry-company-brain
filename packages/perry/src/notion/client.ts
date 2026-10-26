@@ -1,3 +1,8 @@
+// client — reads the standup database from Notion and works out who has not submitted.
+//
+// Reads use the data-sources API (Notion-Version 2025-09-03). The standup
+// database's properties are matched by name: Date, Person, Yesterday, Today,
+// Blockers, Status, and Discord.
 import { Client } from "@notionhq/client";
 import type { PageObjectResponse } from "@notionhq/client/build/src/api-endpoints";
 import { loadConfig } from "@core";
@@ -36,8 +41,12 @@ export function formatDateForFilter(date: Date): string {
 }
 
 /**
- * Queries the standup database for all entries matching a given ISO date
- * string.  Returns raw pages; transform them with `transformStandupPage`.
+ * Queries the standup data source for every page whose Date equals a
+ * YYYY-MM-DD string, following pagination. Returns raw pages; transform them
+ * with `transformStandupPage`. The id comes from Config.NOTION_DATABASE_ID,
+ * which despite its name holds a *data source* id: the standup data source
+ * saved in settings, defaulting to NOTION_STANDUP_DATA_SOURCE_ID (preferred)
+ * or the legacy NOTION_DATABASE_ID env var, read for back-compat.
  */
 export async function fetchStandupPages(dateString: string): Promise<PageObjectResponse[]> {
   const config = loadConfig();
@@ -138,10 +147,10 @@ export async function fetchStandupEntries(date: Date): Promise<StandupEntry[]> {
 }
 
 /**
- * Computes which people from the roster have not submitted a standup for a
- * given date.  Matching is performed first by Discord ID if the entry
- * includes a `discordUserId`.  If not found, it falls back to matching the
- * `personName` property against the roster's notionName.
+ * Returns the active roster members with no matching entry. An entry counts for
+ * a roster member whose `discordUserId` matches the entry's, or whose
+ * `notionName` matches the entry's `personName` case-insensitively; an entry
+ * with both is recorded under both, so either identity marks it submitted.
  */
 export function findMissingStandups(
   entries: StandupEntry[],
@@ -149,11 +158,8 @@ export function findMissingStandups(
 ): Person[] {
   const submitted = new Set<string>();
   for (const entry of entries) {
-    if (entry.discordUserId) {
-      submitted.add(entry.discordUserId);
-    } else if (entry.personName) {
-      submitted.add(entry.personName.toLowerCase());
-    }
+    if (entry.discordUserId) submitted.add(entry.discordUserId);
+    if (entry.personName) submitted.add(entry.personName.toLowerCase());
   }
   return roster.filter((person) => {
     if (person.isActive === false) return false;

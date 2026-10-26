@@ -1,9 +1,23 @@
+// jobs — the daily standup cron schedule.
+//
+// Three daily jobs, each a six-field node-cron expression (seconds first) in
+// the configured timezone: a missing-standup reminder at the reminder time, a
+// second one at the pre-standup reminder time, and the standup summary at the
+// standup time. Every job reads today's entries from Notion and posts to the
+// standup channel. Nothing is scheduled when standups are disabled
+// (`standup.enabled` / STANDUP_ENABLED=false). Times are read once at startup.
 import cron from "node-cron";
-import { loadConfig } from "@core";
+import { getActiveRoster, loadAppSettings, type AppSettings } from "@core";
 import { fetchStandupEntries, findMissingStandups } from "@notion";
-import { getActiveRoster } from "@core";
 import { formatMissing, formatSummary } from "./format";
 import { sendToStandupChannel } from "./client";
+
+/** One scheduled standup job: its name, six-field cron expression, and callback. */
+export interface StandupJob {
+  name: "reminder" | "pre-standup-reminder" | "summary";
+  expression: string;
+  run: () => Promise<void>;
+}
 
 /** Parses a HH:MM string into numeric hours and minutes. */
 function parseHHMM(time: string): { hour: number; minute: number } {
@@ -14,52 +28,69 @@ function parseHHMM(time: string): { hour: number; minute: number } {
   return { hour: hh, minute: mm };
 }
 
+function dailyAt(time: string): string {
+  const { hour, minute } = parseHHMM(time);
+  return `0 ${minute} ${hour} * * *`;
+}
+
+async function postMissingReminder(): Promise<void> {
+  const date = new Date();
+  const entries = await fetchStandupEntries(date);
+  const missing = findMissingStandups(entries, getActiveRoster());
+  await sendToStandupChannel(formatMissing(missing, date));
+}
+
+async function postSummary(): Promise<void> {
+  const date = new Date();
+  const entries = await fetchStandupEntries(date);
+  await sendToStandupChannel(formatSummary(entries, date));
+}
+
 /**
- * Schedules the daily standup reminders and summary posting.  Uses node‑cron
- * under the hood.  All tasks run in the configured timezone.
+ * The standup jobs the given settings call for: none when standups are
+ * disabled, else the two reminders and the summary. Throws if a configured
+ * time has no numeric hour and minute ("HH:MM").
+ */
+export function standupJobs(standup: AppSettings["standup"]): StandupJob[] {
+  if (!standup.enabled) return [];
+  return [
+    { name: "reminder", expression: dailyAt(standup.reminderTime), run: postMissingReminder },
+    { name: "pre-standup-reminder", expression: dailyAt(standup.preStandupReminderTime), run: postMissingReminder },
+    { name: "summary", expression: dailyAt(standup.standupTime), run: postSummary },
+  ];
+}
+
+/**
+ * Schedules the daily standup reminders and summary posting from the current
+ * settings, or logs and schedules nothing when standups are disabled. Throws at
+ * startup if a configured time is not "HH:MM".
  */
 export function scheduleJobs(): void {
-  const config = loadConfig();
-  const tz = config.TIMEZONE;
-  // Reminder 1
-  const { hour: r1Hour, minute: r1Min } = parseHHMM(config.REMINDER_TIME);
-  cron.schedule(
-    `0 ${r1Min} ${r1Hour} * * *`,
-    async () => {
-      const date = new Date();
-      const entries = await fetchStandupEntries(date);
-      const missing = findMissingStandups(entries, getActiveRoster());
-      const content = formatMissing(missing, date);
-      await sendToStandupChannel(content);
-    },
-    { timezone: tz }
-  );
-  // Reminder 2 (pre standup)
-  const { hour: r2Hour, minute: r2Min } = parseHHMM(config.PRE_STANDUP_REMINDER_TIME);
-  cron.schedule(
-    `0 ${r2Min} ${r2Hour} * * *`,
-    async () => {
-      const date = new Date();
-      const entries = await fetchStandupEntries(date);
-      const missing = findMissingStandups(entries, getActiveRoster());
-      const content = formatMissing(missing, date);
-      await sendToStandupChannel(content);
-    },
-    { timezone: tz }
-  );
-  // Summary
-  const { hour: sHour, minute: sMin } = parseHHMM(config.STANDUP_TIME);
-  cron.schedule(
-    `0 ${sMin} ${sHour} * * *`,
-    async () => {
-      const date = new Date();
-      const entries = await fetchStandupEntries(date);
-      const content = formatSummary(entries, date);
-      await sendToStandupChannel(content);
-    },
-    { timezone: tz }
-  );
+  const { standup } = loadAppSettings();
+  const jobs = standupJobs(standup);
+  if (jobs.length === 0) {
+    console.log("Standups are disabled; no standup jobs scheduled.");
+    return;
+  }
+  for (const job of jobs) {
+    cron.schedule(job.expression, guarded(job.run), { timezone: standup.timezone });
+  }
   console.log(
-    `Scheduled standup jobs at ${config.REMINDER_TIME}, ${config.PRE_STANDUP_REMINDER_TIME} and ${config.STANDUP_TIME} (${tz}).`
+    `Scheduled standup jobs at ${standup.reminderTime}, ${standup.preStandupReminderTime} and ${standup.standupTime} (${standup.timezone}).`
   );
+}
+
+/**
+ * Wraps a cron callback so a Notion or Discord failure is logged as a failed
+ * standup job and the schedule keeps running, rather than surfacing as an
+ * anonymous unhandled rejection.
+ */
+function guarded(job: () => Promise<void>): () => Promise<void> {
+  return async () => {
+    try {
+      await job();
+    } catch (error) {
+      console.error("Standup job failed:", error);
+    }
+  };
 }
