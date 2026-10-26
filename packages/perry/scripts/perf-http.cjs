@@ -119,7 +119,10 @@ async function main() {
   for (const result of results) print(result);
 }
 
+// Set exitCode instead of calling process.exit(): exiting while a fetch
+// connection is still closing aborts Node on Windows (a libuv assertion),
+// which would mask the real failure.
 main().catch((error) => {
   console.error(error);
-  process.exit(1);
+  process.exitCode = 1;
 });

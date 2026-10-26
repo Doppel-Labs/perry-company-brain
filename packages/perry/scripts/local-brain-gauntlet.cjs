@@ -39,7 +39,7 @@ async function main() {
 
   const ok = checks.every((check) => check.ok);
   for (const check of checks) console.log(`${check.ok ? "PASS" : "WARN"} ${check.name}: ${check.detail}`);
-  if (!ok && strict) process.exit(1);
+  if (!ok && strict) process.exitCode = 1;
 }
 
 function adminHeaders() {
@@ -64,7 +64,10 @@ async function checkJson(name, url, options = {}) {
   }
 }
 
+// Set exitCode instead of calling process.exit(): exiting while a fetch
+// connection is still closing aborts Node on Windows (a libuv assertion),
+// which would mask the real failure.
 main().catch((error) => {
   console.error(error);
-  process.exit(1);
+  process.exitCode = 1;
 });
