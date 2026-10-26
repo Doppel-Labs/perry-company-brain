@@ -1,8 +1,14 @@
-// users — split out of the former monolithic meeting-store.ts
+// users — the people roster, linking one person across email, Discord, Notion, and GitHub.
 import { type PageOptions, type Row, type UserRecord } from "./types";
-import { normalizePage, slugKey, statement, withDb } from "./db";
+import { statement, withDb } from "./database";
+import { normalizePage, slugKey } from "./values";
 import { userFromRow } from "./rows";
 
+/**
+ * Inserts or fully replaces a user. The id defaults to `user:<slug of email,
+ * else display name>`; every column is overwritten, so omitted optional
+ * fields are cleared and `isActive` defaults to true. No audit row.
+ */
 export function upsertUser(input: {
   id?: string;
   displayName: string;
@@ -52,6 +58,7 @@ export function upsertUser(input: {
   });
 }
 
+/** Alphabetical by display name (default 100, max 100,000). */
 export function listUsers(options: PageOptions = {}): UserRecord[] {
   const { limit, offset } = normalizePage(options, 100, 100_000);
   return withDb((db) =>

@@ -1,10 +1,20 @@
-// change-sets — split out of the former monolithic meeting-store.ts
+// change-sets — validated graph change-sets, one per meeting graph-sync job (table `graph_change_sets`).
+//
+// A change-set is the structured entities/relations/evidence Perry derived
+// from a meeting. It is stored next to its graph-sync job and, when it passed
+// validation, materialized into the ontology tables at write time. An invalid
+// change-set is kept for review only: never materialized and never posted.
+// `apply_status` tracks the graph side: queued, applied (accepted and, after a
+// replay, verified by readback), unverified (a replay write the readback could
+// not confirm), or failed.
 import { DatabaseSync } from "node:sqlite";
 import { type GraphChangeSetRecord, type PageOptions, type Row } from "./types";
-import { insertAudit, normalizePage, statement, withDb } from "./db";
+import { insertAudit, statement, withDb } from "./database";
+import { normalizePage } from "./values";
 import { graphChangeSetFromRow } from "./rows";
 import { materializeOntologyFromChangeSet } from "./ontology";
 
+/** Newest first, optionally filtered by apply status (default 50, max 200). */
 export function listGraphChangeSets(options: PageOptions & { status?: GraphChangeSetRecord["applyStatus"] } = {}): GraphChangeSetRecord[] {
   const { limit, offset } = normalizePage(options, 50, 200);
   return withDb((db) => {
@@ -38,19 +48,40 @@ export function getGraphChangeSetByJobId(graphSyncJobId: string): GraphChangeSet
   });
 }
 
-export function markGraphChangeSetReplayApplied(id: string, result: unknown): GraphChangeSetRecord | undefined {
+/**
+ * Records a manual replay whose write the bridge accepted. `verified` is the
+ * readback verdict: true marks the change-set `applied`; false marks it
+ * `unverified` with `unverifiedReason` as its last error, since only a clean
+ * readback proves the graph holds it. Either way `applied_at` is the write
+ * time. Writes a `graph_change_set.replayed` or `graph_change_set.replay_unverified`
+ * audit row with `result`.
+ */
+export function markGraphChangeSetReplayApplied(
+  id: string,
+  result: unknown,
+  verification: { verified: boolean; unverifiedReason?: string } = { verified: true }
+): GraphChangeSetRecord | undefined {
   return withDb((db) => {
     const now = new Date().toISOString();
+    const status: GraphChangeSetRecord["applyStatus"] = verification.verified ? "applied" : "unverified";
+    const lastError = verification.verified ? null : verification.unverifiedReason ?? "Replay readback did not pass.";
     statement(
       db,
-      "UPDATE graph_change_sets SET apply_status = ?, applied_at = ?, last_error = NULL, updated_at = ? WHERE id = ?"
-    ).run("applied", now, now, id);
-    insertAudit(db, "graph_change_set.replayed", "graph_change_set", id, { result });
+      "UPDATE graph_change_sets SET apply_status = ?, applied_at = ?, last_error = ?, updated_at = ? WHERE id = ?"
+    ).run(status, now, lastError, now, id);
+    insertAudit(
+      db,
+      verification.verified ? "graph_change_set.replayed" : "graph_change_set.replay_unverified",
+      "graph_change_set",
+      id,
+      { result }
+    );
     const row = statement(db, "SELECT * FROM graph_change_sets WHERE id = ?").get(id) as Row | undefined;
     return row ? graphChangeSetFromRow(row) : undefined;
   });
 }
 
+/** Marks a change-set failed after a manual replay; writes a `graph_change_set.replay_failed` audit row. */
 export function markGraphChangeSetReplayFailed(id: string, error: unknown): GraphChangeSetRecord | undefined {
   return withDb((db) => {
     const now = new Date().toISOString();
@@ -67,6 +98,12 @@ export function markGraphChangeSetReplayFailed(id: string, error: unknown): Grap
   });
 }
 
+/**
+ * Inserts or replaces a change-set on `db` (joins the caller's transaction),
+ * then materializes it into the ontology tables if its validation status is
+ * `valid`; an invalid one is stored for review only. Writes a
+ * `graph_change_set.queued` audit row.
+ */
 export function upsertGraphChangeSet(
   db: DatabaseSync,
   input: Omit<GraphChangeSetRecord, "createdAt" | "updatedAt">
@@ -107,7 +144,7 @@ export function upsertGraphChangeSet(
     now,
     now
   );
-  materializeOntologyFromChangeSet(db, input.changeSetJson, input.meetingId, now);
+  if (input.validationStatus === "valid") materializeOntologyFromChangeSet(db, input.changeSetJson, input.meetingId, now);
   insertAudit(db, "graph_change_set.queued", "graph_change_set", input.id, {
     meetingId: input.meetingId,
     graphSyncJobId: input.graphSyncJobId,
@@ -115,6 +152,7 @@ export function upsertGraphChangeSet(
   });
 }
 
+/** Graph-sync onComplete hook: marks the job's change-set applied (no-op if the job has none). */
 export function markGraphChangeSetApplied(db: DatabaseSync, graphSyncJobId: string, appliedAt: string): void {
   statement(
     db,
@@ -126,6 +164,7 @@ export function markGraphChangeSetApplied(db: DatabaseSync, graphSyncJobId: stri
   if (row) insertAudit(db, "graph_change_set.applied", "graph_change_set", String(row.id), { graphSyncJobId });
 }
 
+/** Graph-sync onFail hook: mirrors the job's new status (`queued` on retry, `failed` when retired) and records the error. */
 export function markGraphChangeSetFailed(
   db: DatabaseSync,
   graphSyncJobId: string,

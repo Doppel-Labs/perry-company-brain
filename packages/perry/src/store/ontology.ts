@@ -1,10 +1,19 @@
-// ontology — split out of the former monolithic meeting-store.ts
+// ontology — the materialized company-ontology read model (ontology_* tables).
+//
+// A SQLite projection of every stored graph change-set that passed
+// validation, so ontology queries are fast and work without the Graphiti
+// bridge. It is derived data: it can be cleared and rebuilt from
+// graph_change_sets at any time. Only projects and
+// the company-ontology types below are materialized as entities. Re-applying a
+// change-set is idempotent: entities merge aliases, evidence ids, source
+// meetings, and properties (newer wins); relations are keyed by a hash of
+// subject|relation|object|evidence|validFrom.
 import { createHash } from "node:crypto";
-import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { type CompanyOntologyEntityType, type GraphChangeSet, type GraphEntityType } from "@core";
 import { type OntologyBackfillResult, type OntologyEntityRow, type OntologyEvidenceRow, type OntologyRelationRow, type PageOptions, type Row } from "./types";
-import { mergeJsonArrays, normalizePage, optionalString, parseJsonObject, statement, withBrainTransaction, withDb } from "./db";
+import { statement, withBrainTransaction, withDb } from "./database";
+import { mergeJsonArrays, normalizePage, optionalString, parseJsonObject } from "./values";
 
 const ontologyEntityTypes: readonly CompanyOntologyEntityType[] = [
   "goal",
@@ -20,6 +29,11 @@ const ontologyEntityTypes: readonly CompanyOntologyEntityType[] = [
 
 const materializedOntologyTypes = new Set<GraphEntityType>(["project", ...ontologyEntityTypes]);
 
+/**
+ * Most recently updated first (default 100, max 1000). Without `type`, returns
+ * only company-ontology types unless `includeProjects`. `q` is a
+ * case-insensitive substring match on name, aliases, or stable key.
+ */
 export function listOntologyEntities(
   options: PageOptions & { type?: GraphEntityType; q?: string; changedSince?: string; includeProjects?: boolean } = {}
 ): OntologyEntityRow[] {
@@ -48,6 +62,7 @@ export function listOntologyEntities(
   });
 }
 
+/** Most recently updated first, filtered by any combination of the options (default 200, max 2000). */
 export function listOntologyRelations(
   options: PageOptions & { subjectKey?: string; objectKey?: string; relation?: string; sourceMeetingId?: string; changedSince?: string } = {}
 ): OntologyRelationRow[] {
@@ -80,6 +95,7 @@ export function listOntologyRelations(
   });
 }
 
+/** Most recently updated first; `stableKey` restricts to evidence linked to that entity (default 100, max 1000). */
 export function listOntologyEvidence(
   options: PageOptions & { stableKey?: string; evidenceId?: string; meetingId?: string; changedSince?: string } = {}
 ): OntologyEvidenceRow[] {
@@ -110,6 +126,14 @@ export function listOntologyEvidence(
   });
 }
 
+/**
+ * Re-materializes up to `limit` (default 100,000) valid change-sets, in one
+ * transaction; invalid ones are skipped. By default a full rebuild: the tables are cleared and every
+ * change-set replayed oldest first. With `changedSince`, only change-sets
+ * updated after it are merged in, without clearing. `reset` overrides the
+ * clearing default. `dryRun` estimates counts from the selected change-sets
+ * alone and writes nothing.
+ */
 export function rebuildOntologyMaterializedIndex(
   options: { limit?: number; reset?: boolean; changedSince?: string; dryRun?: boolean } = {}
 ): OntologyBackfillResult {
@@ -128,6 +152,7 @@ export function rebuildOntologyMaterializedIndex(
   );
 }
 
+/** Empties all four ontology tables in one transaction. */
 export function clearOntologyMaterializedIndex(): void {
   withDb((db) => withBrainTransaction(() => clearOntologyTablesInDb(db)));
 }
@@ -136,9 +161,12 @@ function selectGraphChangeSetRowsForOntologyBackfill(db: DatabaseSync, limit: nu
   return changedSince
     ? (statement(
         db,
-        "SELECT meeting_id, change_set_json FROM graph_change_sets WHERE updated_at > ? ORDER BY updated_at ASC LIMIT ?"
+        "SELECT meeting_id, change_set_json FROM graph_change_sets WHERE validation_status = 'valid' AND updated_at > ? ORDER BY updated_at ASC LIMIT ?"
       ).all(changedSince, limit) as Row[])
-    : (statement(db, "SELECT meeting_id, change_set_json FROM graph_change_sets ORDER BY created_at ASC LIMIT ?").all(limit) as Row[]);
+    : (statement(
+        db,
+        "SELECT meeting_id, change_set_json FROM graph_change_sets WHERE validation_status = 'valid' ORDER BY created_at ASC LIMIT ?"
+      ).all(limit) as Row[]);
 }
 
 function estimateOntologyBackfill(rows: Row[]): OntologyBackfillResult {
@@ -157,6 +185,11 @@ function estimateOntologyBackfill(rows: Row[]): OntologyBackfillResult {
   return { changeSets: rows.length, entities: entities.size, relations: relations.size, evidence: evidence.size };
 }
 
+/**
+ * Merges one change-set into the ontology tables on `db` (joins the caller's
+ * transaction). Silently does nothing if the JSON is not a schemaVersion 1
+ * change-set. Entities keep only evidence ids present in this change-set.
+ */
 export function materializeOntologyFromChangeSet(db: DatabaseSync, changeSetJson: string, fallbackMeetingId: string, now: string): void {
   const changeSet = parseGraphChangeSetJson(changeSetJson);
   if (!changeSet) return;
