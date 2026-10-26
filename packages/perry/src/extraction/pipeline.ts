@@ -11,11 +11,13 @@
 //
 // Model output is untrusted. Before it is used, every item must be grounded in
 // the text the model saw (most of its content words appear in the note), owners
-// are kept only when they match an attendee or roster member, and a reply below
+// are kept only when they match an attendee or roster member, due dates only
+// when the note supports them (see due-dates.ts), and a reply below
 // PERRY_EXTRACTION_MIN_CONFIDENCE falls back to rules. The result always
 // records how it was produced (`extraction`), including why a fallback happened.
-import { getRoster } from "@core";
+import { getRoster, loadAppSettings } from "@core";
 import type { MeetingNote } from "@meetings";
+import { groundDueDate } from "./due-dates";
 import { extractMeetingSemantics, getExtractionBackend } from "./extract";
 import { extractKnowledge, type ExtractedKnowledge } from "./knowledge";
 import { getLmStudioExtractionConfig } from "./lm-studio";
@@ -86,7 +88,7 @@ export async function extractMeetingKnowledge(note: MeetingNote, options: Extrac
     .map((item) => ({
       text: clean(item.text),
       owner: resolveOwner(item.owner, people),
-      dueDate: groundedDueDate(item.dueDate, source),
+      dueDate: groundDueDate(item.dueDate, source, note.startedAt, configuredTimeZone()),
     }));
   const entities = groundedEntities(reply.entities, source);
   const droppedUngrounded = reply.decisions.length + reply.actionItems.length - decisions.length - actionItems.length;
@@ -190,12 +192,13 @@ export function resolveOwner(owner: string | undefined, people: string[]): strin
   return byFirstName.length === 1 ? byFirstName[0] : undefined;
 }
 
-/** Keeps an ISO date, or a due phrase that literally appears in the note; drops anything invented. */
-function groundedDueDate(dueDate: string | undefined, source: string): string | undefined {
-  const value = dueDate?.trim();
-  if (!value) return undefined;
-  if (/^\d{4}-\d{2}-\d{2}/u.test(value) && !Number.isNaN(Date.parse(value))) return value.slice(0, 10);
-  return source.toLowerCase().includes(value.toLowerCase()) ? value : undefined;
+/** The configured standup timezone, used to read "tomorrow" in the meeting's local day; undefined if settings are unreadable. */
+function configuredTimeZone(): string | undefined {
+  try {
+    return loadAppSettings().standup.timezone;
+  } catch {
+    return undefined;
+  }
 }
 
 function groundedEntities(entities: LocalSemanticExtraction["entities"], source: string): ExtractedEntity[] {

@@ -74,7 +74,7 @@ Model output is treated as untrusted input:
 
 - **Grounding.** A decision or action item is kept only if at least 60% of its content words (lightly stemmed) appear in the text the model was shown. Paraphrase passes; invented facts do not.
 - **Owners** must match an attendee, the note's creator, or a roster member, by full name or by an unambiguous first name. Otherwise the action is kept without an owner.
-- **Due dates** must be ISO dates or phrases that appear in the note. **Entities** must appear in the note verbatim.
+- **Due dates** must be supported by the note. An ISO date is kept only if the note states it, or contains a phrase that resolves to exactly that date from the meeting's date: "today", "tomorrow", "next week", a weekday ("by Friday", "next Fri"), "end of week", a month and day ("Nov 2", "2 November", "11/2"), or a full date with a year. "Tomorrow" is read in both UTC and the configured timezone. Without a meeting date, only fully written dates can be confirmed. Any other due phrase must appear verbatim (`src/extraction/due-dates.ts`). **Entities** must appear in the note verbatim.
 - **Confidence.** A reply below `PERRY_EXTRACTION_MIN_CONFIDENCE` (default 0.5) is discarded. So is an `llm`-mode reply with nothing grounded while the rules found something.
 
 Every result carries `extraction` provenance: the method actually used, the requested mode, the backend and model, confidence, latency, how many ungrounded items were dropped, and why a fallback happened. Provenance is stored with each approval and shown in the admin UI's Granola preview, so a reviewer judges the extraction, not just the announcement.
